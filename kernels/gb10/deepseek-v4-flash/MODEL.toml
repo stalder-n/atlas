@@ -97,7 +97,7 @@ fp8_kv_calibration_tokens = 256
 # that probes the handle and the resolved fallback it falls back to; none
 # are silenced speculatively.
 
-[expected_absent.prefill_attn]
+[expected_absent.inferspark_prefill_512tc]
 inferspark_prefill_512tc = """
 Tensor-core HDIM=512 prefill, an instantiation of the shared
 `inferspark_prefill` at BC=16. `ops::wide_prefill_kernel` probes for it on every
@@ -143,3 +143,12 @@ the compressed-MLA path instead: run_paged_decode.rs routes
 KvCacheDtype::Fp8 with the V4-Flash rope config to
 mla_paged_decode_fp8 (resolves here) BEFORE the generic arms, so this
 handle can never fire as served."""
+
+[expected_absent.moe_silu_mul]
+silu_mul_quant_fp8 = """
+Intentionally omitted by this target's SwiGLU-clamped moe_silu_mul shadow,
+as recorded in nvfp4/KERNEL.toml [shadow_exempt]. The common fused kernel
+has no V4 clamp and must not replace it. MoeLayer::fused_silu_quant_ok
+requires a nonzero handle; when absent, forward_prefill_fp8 uses the shipped
+moe_silu_mul followed by per_token_group_quant_fp8, preserving the clamp.
+The static shadow exemption alone does not declare this runtime probe absent."""
