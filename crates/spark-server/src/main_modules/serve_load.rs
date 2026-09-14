@@ -127,6 +127,7 @@ pub(crate) fn load_model(
     // 1. Load model config (supports HF config.json and Mistral params.json)
     spark_runtime::progress::phase(2, "config");
     let (mut config, config_json) = serve_phases::load_model_config(&model_dir)?;
+    serve_phases::validate_v4_bringup(&args, &config)?;
 
     // CLI `--lm-head-dtype` override (replaces ATLAS_LMHEAD_BF16). Validate eagerly (PCND).
     // Sets both `lm_head_bf16_override` (skip/keep-quantized signal consumed by
@@ -586,6 +587,7 @@ pub(crate) fn load_model(
         max_batch_tokens,
         spec_tokens: _spec_tokens,
     } = serve_phases::resolve_prefill_budget(&args, ssm_prefill_chunk);
+    serve_phases::validate_v4_prefill_budget(&config, args.max_seq_len, prefill_budget)?;
     // 2026-08-21: the community-reported "prefix caching × DFlash wrong
     // outputs on multi-turn cache hits (SM12.x)" warning that used to print
     // here is RESOLVED and was never a cache or hardware defect. The carrier

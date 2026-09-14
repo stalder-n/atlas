@@ -83,7 +83,7 @@ pub(crate) fn load_weight_store(
             };
             loader.peak_memory_multiplier = mult;
             loader.skip_activation_scales = skip_activation_scales(config);
-            loader.skip_mtp = skip_mtp(config);
+            loader.skip_mtp = skip_mtp(args, config);
             // A text-only port never binds the vision tower, so don't read it.
             // The reclaim in `build_model` still catches every other path, but
             // it runs AFTER the inference-buffer preflight has already sized
@@ -120,7 +120,7 @@ pub(crate) fn load_weight_store(
         };
         loader.peak_memory_multiplier = mult;
         loader.skip_activation_scales = skip_activation_scales(config);
-        loader.skip_mtp = skip_mtp(config);
+        loader.skip_mtp = skip_mtp(args, config);
         loader
             .load(model_dir, gpu, oom_reserve_bytes)
             .context("Failed to load model weights")?
@@ -410,14 +410,46 @@ fn skip_activation_scales(config: &ModelConfig) -> bool {
 }
 
 /// Whether this model's loader builds no MTP head, so `mtp.*` need not be
-/// uploaded at all.
+/// uploaded at all. V4 ordinary serving also leaves the draft disabled,
+/// independently of whether the checkpoint carries legacy MTP or DSpark.
 ///
 /// `Qwen4ExpWeightLoader::load_mtp_weights` returns `None` (#753 item I: the
 /// MTP block is effectively a second model — its own 512-expert MoE, its own
 /// hyper-connection mixer, its own indexer). Uploading ~1.5 GB of weights
 /// that are then discarded is memory the KV cache needs.
-fn skip_mtp(config: &ModelConfig) -> bool {
+fn skip_mtp(args: &cli::ServeArgs, config: &ModelConfig) -> bool {
     matches!(config.model_type.as_str(), "qwen4_exp")
+        || (config.model_type == "deepseek_v4" && !args.speculative)
+}
+
+#[cfg(test)]
+mod draft_loading_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn target_only_v4_does_not_upload_draft_tensors() {
+        let mut config = ModelConfig::qwen3_next_80b_nvfp4();
+        config.model_type = "deepseek_v4".into();
+        let mut args = cli::ServeArgs::parse_from(["spark"]);
+        assert!(skip_mtp(&args, &config));
+        config.dspark_block_size = 5;
+        assert!(skip_mtp(&args, &config));
+        // Preserve the legacy checkpoint's loader contract when speculation is
+        // requested; the serving capability gate currently refuses that mode.
+        config.dspark_block_size = 0;
+        args.speculative = true;
+        assert!(!skip_mtp(&args, &config));
+    }
+
+    #[test]
+    fn other_models_keep_their_draft_loading_policy() {
+        let mut config = ModelConfig::qwen3_next_80b_nvfp4();
+        let args = cli::ServeArgs::parse_from(["spark"]);
+        assert!(!skip_mtp(&args, &config));
+        config.model_type = "qwen4_exp".into();
+        assert!(skip_mtp(&args, &config));
+    }
 }
 
 /// Will the model's weight loader bind a vision encoder?

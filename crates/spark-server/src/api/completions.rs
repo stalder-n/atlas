@@ -116,6 +116,20 @@ pub async fn completions(
     }
     for prompt_tokens in &prompts {
         let prompt_len = prompt_tokens.len();
+        if !super::context_budget::fits_context(
+            state.tokenizer.uses_deepseek_v4_encoding(),
+            state.max_seq_len,
+            prompt_len,
+            req.max_tokens,
+        ) {
+            return openai_error_response(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "DeepSeek V4 bring-up requires prompt plus max_tokens <= {}",
+                    state.max_seq_len
+                ),
+            );
+        }
         if prompt_len >= state.max_seq_len {
             return openai_error_response(
                 StatusCode::BAD_REQUEST,

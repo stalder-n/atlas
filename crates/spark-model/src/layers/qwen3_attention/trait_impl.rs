@@ -108,7 +108,13 @@ impl TransformerLayer for Qwen3AttentionLayer {
     /// graph captured on the dense path would replay wrong attention once
     /// selection activates.
     fn decode_graph_unsupported(&self) -> bool {
+        // V4 appends compressed blocks and advances ring metadata on the host.
+        // Graph replay would freeze those updates, including with EP graphs on.
         self.qsa.is_some()
+            || self
+                .mla
+                .as_ref()
+                .is_some_and(|mla| mla.compressor.is_some())
     }
 
     fn has_aux_state(&self) -> bool {

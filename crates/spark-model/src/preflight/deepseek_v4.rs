@@ -25,9 +25,9 @@ pub(super) fn check_native_dspark_checkpoint(
         "DeepSeek-V4 native quant contract requires hidden and MoE dimensions divisible by 128"
     );
     ensure!(
-        config.dspark_block_size == 5,
-        "DeepSeek-V4 native DSpark contract requires K=5, found K={}",
-        config.dspark_block_size,
+        !use_speculative,
+        "DeepSeek-V4 native DSpark proposer is not implemented; disable speculation. \
+         Legacy V4 MTP is a different architecture."
     );
 
     check_target_quant_contract(store, config)?;
@@ -35,7 +35,7 @@ pub(super) fn check_native_dspark_checkpoint(
     let local_experts = local_end - local_start;
     tracing::info!(
         "DeepSeek-V4 target quant contract: EP rank {}/{} owns experts [{}..{}); \
-         routed={} MXFP4/E8M0 projections -> E8M0 MoE; \
+         routed={} projections validated per tensor group (NVFP4/E4M3 or MXFP4/E8M0); \
          shared={} FP8/E8M0 projections -> NVFP4 MoE; attention={} FP8/E8M0 projections -> BF16 dense",
         config.ep_rank,
         config.ep_world_size,
@@ -46,21 +46,7 @@ pub(super) fn check_native_dspark_checkpoint(
         config.num_hidden_layers * ATTN_PROJECTIONS.len(),
     );
 
-    if !use_speculative {
-        tracing::info!(
-            "DeepSeek-V4 checkpoint declares native DSpark K={}, but speculation is off; \
-             draft tensors remain independent of the qualified target path",
-            config.dspark_block_size,
-        );
-        return Ok(());
-    }
-
-    check_dspark_quant_contract(store, config)?;
-    tracing::info!(
-        "Pre-flight: checkpoint-native DeepSeek-V4 DSpark K={} passed its three-stage \
-         tensor and quantization contract; enabling the native distributed proposer",
-        config.dspark_block_size,
-    );
+    tracing::info!("DeepSeek-V4 speculation is off; skipping independent DSpark draft tensors");
     Ok(())
 }
 
@@ -81,6 +67,10 @@ fn check_target_quant_contract(store: &WeightStore, config: &ModelConfig) -> Res
     Ok(())
 }
 
+#[expect(
+    dead_code,
+    reason = "Retain independent draft diagnostics for native DSpark implementation"
+)]
 fn check_dspark_quant_contract(store: &WeightStore, config: &ModelConfig) -> Result<()> {
     let draft_config = native_dspark_config(config)?;
     let stages = discover_dspark_stages(store);
@@ -147,6 +137,7 @@ fn check_expert_group(store: &WeightStore, ffn: &str, config: &ModelConfig) -> R
         "invalid DeepSeek-V4 EP expert range [{local_start}..{local_end}) for {} experts",
         config.num_experts,
     );
+    let mut group_format = None;
     for expert in local_start..local_end {
         for projection in PROJECTIONS {
             let prefix = format!("{ffn}.experts.{expert}.{projection}");
@@ -157,12 +148,12 @@ fn check_expert_group(store: &WeightStore, ffn: &str, config: &ModelConfig) -> R
                 WeightDtype::UInt8,
                 &[out_dim, in_dim / 2],
             )?;
-            expect_tensor(
-                store,
-                &format!("{prefix}.scale"),
-                WeightDtype::FP8E8M0,
-                &[out_dim, in_dim / 32],
-            )?;
+            let format = crate::weight_map::v4_quant::resolve_packed_expert(store, &prefix)?;
+            if let Some(expected) = group_format {
+                ensure!(format == expected, "`{ffn}` mixes routed expert formats");
+            } else {
+                group_format = Some(format);
+            }
         }
     }
     Ok(())

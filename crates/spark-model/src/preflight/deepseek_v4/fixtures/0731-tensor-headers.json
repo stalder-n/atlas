@@ -1,0 +1,384 @@
+{
+  "layers.0.attn.wq_a.weight": {
+    "dtype": "F8_E4M3",
+    "shape": [
+      1024,
+      4096
+    ],
+    "data_offsets": [
+      80688472,
+      84882776
+    ]
+  },
+  "layers.0.attn.wq_a.scale": {
+    "dtype": "F8_E8M0",
+    "shape": [
+      8,
+      32
+    ],
+    "data_offsets": [
+      11478616,
+      11478872
+    ]
+  },
+  "layers.0.ffn.shared_experts.w1.weight": {
+    "dtype": "F8_E4M3",
+    "shape": [
+      2048,
+      4096
+    ],
+    "data_offsets": [
+      521090392,
+      529479000
+    ]
+  },
+  "layers.0.ffn.shared_experts.w1.scale": {
+    "dtype": "F8_E8M0",
+    "shape": [
+      16,
+      32
+    ],
+    "data_offsets": [
+      11480920,
+      11481432
+    ]
+  },
+  "layers.0.ffn.shared_experts.w3.weight": {
+    "dtype": "F8_E4M3",
+    "shape": [
+      2048,
+      4096
+    ],
+    "data_offsets": [
+      537867608,
+      546256216
+    ]
+  },
+  "layers.0.ffn.shared_experts.w3.scale": {
+    "dtype": "F8_E8M0",
+    "shape": [
+      16,
+      32
+    ],
+    "data_offsets": [
+      11481944,
+      11482456
+    ]
+  },
+  "layers.0.ffn.shared_experts.w2.weight": {
+    "dtype": "F8_E4M3",
+    "shape": [
+      4096,
+      2048
+    ],
+    "data_offsets": [
+      529479000,
+      537867608
+    ]
+  },
+  "layers.0.ffn.shared_experts.w2.scale": {
+    "dtype": "F8_E8M0",
+    "shape": [
+      32,
+      16
+    ],
+    "data_offsets": [
+      11481432,
+      11481944
+    ]
+  },
+  "layers.0.ffn.experts.0.w1.weight": {
+    "dtype": "U8",
+    "shape": [
+      2048,
+      2048
+    ],
+    "data_offsets": [
+      546256216,
+      550450520
+    ]
+  },
+  "layers.0.ffn.experts.0.w3.weight": {
+    "dtype": "U8",
+    "shape": [
+      2048,
+      2048
+    ],
+    "data_offsets": [
+      554644824,
+      558839128
+    ]
+  },
+  "layers.0.ffn.experts.128.w1.weight": {
+    "dtype": "U8",
+    "shape": [
+      2048,
+      2048
+    ],
+    "data_offsets": [
+      961492312,
+      965686616
+    ]
+  },
+  "layers.0.ffn.experts.128.w3.weight": {
+    "dtype": "U8",
+    "shape": [
+      2048,
+      2048
+    ],
+    "data_offsets": [
+      969880920,
+      974075224
+    ]
+  },
+  "layers.0.ffn.experts.0.w2.weight": {
+    "dtype": "U8",
+    "shape": [
+      4096,
+      1024
+    ],
+    "data_offsets": [
+      550450520,
+      554644824
+    ]
+  },
+  "layers.0.ffn.experts.128.w2.weight": {
+    "dtype": "U8",
+    "shape": [
+      4096,
+      1024
+    ],
+    "data_offsets": [
+      965686616,
+      969880920
+    ]
+  },
+  "layers.0.ffn.experts.0.w1.weight_scale": {
+    "dtype": "F8_E4M3",
+    "shape": [
+      2048,
+      256
+    ],
+    "data_offsets": [
+      118437208,
+      118961496
+    ]
+  },
+  "layers.0.ffn.experts.0.w1.weight_scale_2": {
+    "dtype": "F32",
+    "shape": [],
+    "data_offsets": [
+      6205700,
+      6205704
+    ]
+  },
+  "layers.0.ffn.experts.0.w1.input_scale": {
+    "dtype": "F32",
+    "shape": [],
+    "data_offsets": [
+      6205696,
+      6205700
+    ]
+  },
+  "layers.0.ffn.experts.0.w2.weight_scale": {
+    "dtype": "F8_E4M3",
+    "shape": [
+      4096,
+      128
+    ],
+    "data_offsets": [
+      118961496,
+      119485784
+    ]
+  },
+  "layers.0.ffn.experts.0.w2.weight_scale_2": {
+    "dtype": "F32",
+    "shape": [],
+    "data_offsets": [
+      6205708,
+      6205712
+    ]
+  },
+  "layers.0.ffn.experts.0.w2.input_scale": {
+    "dtype": "F32",
+    "shape": [],
+    "data_offsets": [
+      6205704,
+      6205708
+    ]
+  },
+  "layers.0.ffn.experts.0.w3.weight_scale": {
+    "dtype": "F8_E4M3",
+    "shape": [
+      2048,
+      256
+    ],
+    "data_offsets": [
+      119485784,
+      120010072
+    ]
+  },
+  "layers.0.ffn.experts.0.w3.weight_scale_2": {
+    "dtype": "F32",
+    "shape": [],
+    "data_offsets": [
+      6205716,
+      6205720
+    ]
+  },
+  "layers.0.ffn.experts.0.w3.input_scale": {
+    "dtype": "F32",
+    "shape": [],
+    "data_offsets": [
+      6205712,
+      6205716
+    ]
+  },
+  "layers.0.ffn.experts.128.w1.weight_scale": {
+    "dtype": "F8_E4M3",
+    "shape": [
+      2048,
+      256
+    ],
+    "data_offsets": [
+      170341720,
+      170866008
+    ]
+  },
+  "layers.0.ffn.experts.128.w1.weight_scale_2": {
+    "dtype": "F32",
+    "shape": [],
+    "data_offsets": [
+      6206492,
+      6206496
+    ]
+  },
+  "layers.0.ffn.experts.128.w1.input_scale": {
+    "dtype": "F32",
+    "shape": [],
+    "data_offsets": [
+      6206488,
+      6206492
+    ]
+  },
+  "layers.0.ffn.experts.128.w2.weight_scale": {
+    "dtype": "F8_E4M3",
+    "shape": [
+      4096,
+      128
+    ],
+    "data_offsets": [
+      170866008,
+      171390296
+    ]
+  },
+  "layers.0.ffn.experts.128.w2.weight_scale_2": {
+    "dtype": "F32",
+    "shape": [],
+    "data_offsets": [
+      6206500,
+      6206504
+    ]
+  },
+  "layers.0.ffn.experts.128.w2.input_scale": {
+    "dtype": "F32",
+    "shape": [],
+    "data_offsets": [
+      6206496,
+      6206500
+    ]
+  },
+  "layers.0.ffn.experts.128.w3.weight_scale": {
+    "dtype": "F8_E4M3",
+    "shape": [
+      2048,
+      256
+    ],
+    "data_offsets": [
+      171390296,
+      171914584
+    ]
+  },
+  "layers.0.ffn.experts.128.w3.weight_scale_2": {
+    "dtype": "F32",
+    "shape": [],
+    "data_offsets": [
+      6206508,
+      6206512
+    ]
+  },
+  "layers.0.ffn.experts.128.w3.input_scale": {
+    "dtype": "F32",
+    "shape": [],
+    "data_offsets": [
+      6206504,
+      6206508
+    ]
+  },
+  "mtp.0.ffn.experts.0.w1.weight": {
+    "dtype": "I8",
+    "shape": [
+      2048,
+      2048
+    ],
+    "data_offsets": [
+      389061976,
+      393256280
+    ]
+  },
+  "mtp.0.ffn.experts.0.w1.scale": {
+    "dtype": "F8_E8M0",
+    "shape": [
+      2048,
+      128
+    ],
+    "data_offsets": [
+      5278552,
+      5540696
+    ]
+  },
+  "mtp.0.ffn.experts.0.w3.weight": {
+    "dtype": "I8",
+    "shape": [
+      2048,
+      2048
+    ],
+    "data_offsets": [
+      397450584,
+      401644888
+    ]
+  },
+  "mtp.0.ffn.experts.0.w3.scale": {
+    "dtype": "F8_E8M0",
+    "shape": [
+      2048,
+      128
+    ],
+    "data_offsets": [
+      5802840,
+      6064984
+    ]
+  },
+  "mtp.0.ffn.experts.0.w2.weight": {
+    "dtype": "I8",
+    "shape": [
+      4096,
+      1024
+    ],
+    "data_offsets": [
+      393256280,
+      397450584
+    ]
+  },
+  "mtp.0.ffn.experts.0.w2.scale": {
+    "dtype": "F8_E8M0",
+    "shape": [
+      4096,
+      64
+    ],
+    "data_offsets": [
+      5540696,
+      5802840
+    ]
+  }
+}

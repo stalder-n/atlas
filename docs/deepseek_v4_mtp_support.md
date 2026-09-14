@@ -1,5 +1,9 @@
 # DeepSeek-V4-Flash MTP Support — Implementation Plan
 
+> Historical plan for the older checkpoint's legacy MTP architecture.
+> The 0731 checkpoint declares native three-stage DSpark; Atlas does not yet
+> implement that proposer and rejects speculation for it.
+
 **Status:** Design complete & shape-grounded. Loader/forward to be implemented and runtime-verified once
 `nvidia/DeepSeek-V4-Flash-NVFP4` is local on both nodes and the GPU is free.
 

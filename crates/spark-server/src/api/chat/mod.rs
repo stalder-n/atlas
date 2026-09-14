@@ -423,6 +423,21 @@ pub(crate) async fn chat_completions_inner(
         );
     }
 
+    if !super::context_budget::fits_context(
+        state.tokenizer.uses_deepseek_v4_encoding(),
+        state.max_seq_len,
+        prompt_len,
+        max_tokens,
+    ) {
+        return ChatOutcome::Http(openai_error_response(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "DeepSeek V4 bring-up requires prompt plus max_tokens <= {} (prompt={prompt_len}, max_tokens={max_tokens})",
+                state.max_seq_len
+            ),
+        ));
+    }
+
     // ── Phase 7: dispatch streaming or blocking ─────────────────
     if req.stream {
         return super::chat_stream_dispatch::dispatch_streaming(

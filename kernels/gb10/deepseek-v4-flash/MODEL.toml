@@ -1,6 +1,8 @@
 [model]
 name = "deepseek-v4-flash"
-hf_id = "RedHatAI/DeepSeek-V4-Flash-NVFP4-FP8"
+# Representative checkpoint metadata; runtime dimensions come from config.json.
+# The 0731 profile is constrained to 2048 tokens pending GPU validation.
+hf_id = "nvidia/DeepSeek-V4-Flash-0731-NVFP4"
 params = "284B"
 active_params = "13B"
 architecture = "MLA + MoE + mHC + Hybrid Attention (CSA/HCA)"
@@ -15,8 +17,9 @@ kv_heads = 1
 intermediate_size = 2048
 
 vocab_size = 129280
-max_position_embeddings = 131072
-rope_theta = 160000
+max_position_embeddings = 1048576
+# Base RoPE; compression RoPE uses 160000 from checkpoint config.
+rope_theta = 10000
 partial_rotary_factor = 0.125
 
 # MLA-specific
@@ -33,8 +36,9 @@ num_shared_experts = 1
 moe_intermediate_size = 2048
 top_k = 6
 
-# MTP (Multi-Module Token Prediction)
-mtp_layers = 5
+# Legacy num_nextn_predict_layers metadata. Native 0731 DSpark has three
+# stages and K=5 proposals; K is not a layer count. DSpark is not implemented.
+mtp_layers = 1
 
 # Hyper-Connections (mHC)
 hc_mult = 4
@@ -51,7 +55,8 @@ yarn_original_max_position_embeddings = 65536
 model_type = "deepseek_v4"
 
 # DeepSeek V4 Flash uses hybrid attention (CSA/HCA) with compress_ratios.
-# Currently falls back to full_attention; hybrid support is pending.
+# Compression runs eagerly; per-query sparse selection and general request
+# state handling remain incomplete. The server enforces constrained bring-up.
 # o_lora_rank > 0 distinguishes Flash from V3/V4-Pro.
 
 # Recommended sampling (DeepSeek V4 family defaults).
