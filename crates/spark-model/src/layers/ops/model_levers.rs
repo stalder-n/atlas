@@ -254,6 +254,11 @@ pub struct ModelLevers {
     /// inherit [`Self::shared_w4a4`].
     pub shared_w4a4_down: bool,
 
+    /// Native FP8-weight V4 prefill projections; `ATLAS_V4_FP8_PREFILL=1`, off by default.
+    pub v4_fp8_prefill: bool,
+    /// V4 compressed tensor-core attention; `ATLAS_V4_COMPRESSED_ATTN_TC=1`, off by default.
+    pub v4_compressed_attn_tc: bool,
+
     // ── Attention ──
     /// Contiguous-attention path for the DFlash head.
     pub dflash_contig_attn: bool,

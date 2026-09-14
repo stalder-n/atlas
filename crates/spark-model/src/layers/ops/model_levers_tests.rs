@@ -218,3 +218,23 @@ fn externally_resolved_shadow_and_drafter_values_are_carried() {
         crate::model::drafter_context::DrafterContext::OFF
     );
 }
+
+#[test]
+fn v4_numerical_levers_are_independent_strict_opt_ins() {
+    for value in ["0", "true", "", "yes"] {
+        let flags = resolve(&[
+            ("ATLAS_V4_FP8_PREFILL", value),
+            ("ATLAS_V4_COMPRESSED_ATTN_TC", value),
+        ]);
+        assert!(!flags.v4_fp8_prefill && !flags.v4_compressed_attn_tc);
+    }
+    let fp8 = resolve(&[("ATLAS_V4_FP8_PREFILL", "1")]);
+    assert!(fp8.v4_fp8_prefill && !fp8.v4_compressed_attn_tc);
+    let tc = resolve(&[("ATLAS_V4_COMPRESSED_ATTN_TC", "1")]);
+    assert!(!tc.v4_fp8_prefill && tc.v4_compressed_attn_tc);
+    let both = resolve(&[
+        ("ATLAS_V4_FP8_PREFILL", "1"),
+        ("ATLAS_V4_COMPRESSED_ATTN_TC", "1"),
+    ]);
+    assert!(both.v4_fp8_prefill && both.v4_compressed_attn_tc);
+}
