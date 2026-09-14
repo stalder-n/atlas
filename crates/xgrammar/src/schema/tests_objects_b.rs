@@ -279,3 +279,41 @@ fn identical_subschemas_share_a_rule() {
     let count = got.matches("basic_integer").count();
     assert!(count >= 2, "expected shared basic_integer references");
 }
+
+#[test]
+fn deepseek_dsml_matcher_preserves_typed_values() {
+    for (kind, flag, value) in [
+        ("string", "true", ""),
+        ("string", "true", "你好\n=x => <div>\n"),
+        ("integer", "false", "42"),
+        ("boolean", "false", "true"),
+        ("null", "false", "null"),
+    ] {
+        let schema = format!(
+            r#"{{"type":"object","properties":{{"q":{{"type":"{kind}"}}}},"required":["q"],"additionalProperties":false}}"#
+        );
+        let grammar = deepseek_xml_tool_calling_to_ebnf(&schema).unwrap();
+        let valid =
+            format!("<｜DSML｜parameter name=\"q\" string=\"{flag}\">{value}</｜DSML｜parameter>");
+        assert!(accepts(&grammar, &valid), "{valid:?}\n{grammar}");
+        let wrong = if flag == "true" { "false" } else { "true" };
+        assert!(!accepts(
+            &grammar,
+            &valid.replace(
+                &format!("string=\"{flag}\""),
+                &format!("string=\"{wrong}\"")
+            )
+        ));
+        assert!(!accepts(
+            &grammar,
+            &valid.replace("name=\"q\"", "name=\"unknown\"")
+        ));
+        assert!(!accepts(&grammar, ""));
+    }
+}
+
+#[test]
+fn deepseek_dsml_rejects_recursive_parameter_union() {
+    let schema = r##"{"type":"object","properties":{"q":{"$ref":"#/$defs/loop"}},"$defs":{"loop":{"anyOf":[{"type":"string"},{"$ref":"#/$defs/loop"}]}}}"##;
+    assert!(deepseek_xml_tool_calling_to_ebnf(schema).is_err());
+}

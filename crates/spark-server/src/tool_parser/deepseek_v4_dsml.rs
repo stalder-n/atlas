@@ -2,8 +2,8 @@
 
 use super::*;
 
-pub(super) const DSML_OPEN: &str = "<｜DSML｜tool_calls>";
-pub(super) const DSML_CLOSE: &str = "</｜DSML｜tool_calls>";
+pub(crate) const DSML_OPEN: &str = "<｜DSML｜tool_calls>";
+pub(crate) const DSML_CLOSE: &str = "</｜DSML｜tool_calls>";
 const INVOKE_OPEN: &str = "<｜DSML｜invoke name=\"";
 const INVOKE_CLOSE: &str = "</｜DSML｜invoke>";
 const PARAM_OPEN: &str = "<｜DSML｜parameter name=\"";
@@ -14,6 +14,19 @@ pub struct DeepseekV4DsmlParser;
 impl ToolCallParser for DeepseekV4DsmlParser {
     fn name(&self) -> &str {
         "deepseek_v4"
+    }
+
+    fn compile_tool_grammar(
+        &self,
+        engine: &mut GrammarEngine,
+        tools: &[ToolDefinition],
+        use_triggers: bool,
+    ) -> Option<Result<CompiledGrammar, GrammarError>> {
+        Some(engine.compile_deepseek_v4_tool_grammar(tools, use_triggers))
+    }
+
+    fn has_tool_grammar(&self) -> bool {
+        true
     }
 
     fn system_prompt(

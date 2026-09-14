@@ -42,6 +42,7 @@ mod float_regex;
 mod formats;
 mod gen_array;
 mod gen_composite;
+mod gen_dsml;
 mod gen_object;
 mod gen_object_props;
 mod gen_object_props_constrained;

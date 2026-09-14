@@ -116,4 +116,24 @@ mod tests {
             Some("bare_json")
         ));
     }
+    #[test]
+    fn dsml_request_policy_keeps_auto_required_named_and_none_distinct() {
+        for (choice, active, required) in [
+            (ToolChoice::Mode("auto".into()), true, false),
+            (ToolChoice::Mode("required".into()), true, true),
+            (
+                ToolChoice::Specific {
+                    function: ToolChoiceFunction { name: "run".into() },
+                },
+                true,
+                true,
+            ),
+            (ToolChoice::Mode("none".into()), false, false),
+        ] {
+            assert_eq!(
+                tool_choice_required_for_parser(active, Some(&choice), Some("deepseek_v4")),
+                required
+            );
+        }
+    }
 }
