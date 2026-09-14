@@ -247,16 +247,23 @@ pub fn stop_and_join(timeout: std::time::Duration) {
 /// `TERM=dumb`. EP workers are additionally refused in `serve()` — belt and
 /// braces, since rank isn't parsed yet when this runs.
 pub fn plain_mode(no_tui_flag: bool) -> bool {
-    if no_tui_flag {
-        return true;
-    }
-    if std::env::var("ATLAS_NO_TUI").as_deref() == Ok("1") {
-        return true;
-    }
-    if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
-        return true;
-    }
-    matches!(std::env::var("TERM").as_deref(), Ok("dumb") | Err(_))
+    plain_mode_for(
+        no_tui_flag,
+        std::env::var("ATLAS_NO_TUI").as_deref() == Ok("1"),
+        std::io::stdout().is_terminal(),
+        std::io::stdin().is_terminal(),
+        matches!(std::env::var("TERM").as_deref(), Ok("dumb") | Err(_)),
+    )
+}
+
+fn plain_mode_for(
+    no_tui_flag: bool,
+    no_tui_env: bool,
+    stdout_terminal: bool,
+    stdin_terminal: bool,
+    dumb_or_missing_term: bool,
+) -> bool {
+    no_tui_flag || no_tui_env || !stdout_terminal || !stdin_terminal || dumb_or_missing_term
 }
 
 #[cfg(test)]
@@ -270,9 +277,17 @@ mod tests {
     }
 
     #[test]
-    fn piped_test_runner_is_plain() {
-        // Under `cargo test` stdout is captured (not a TTY) => plain. This is
-        // exactly the property the benchmark rigs rely on.
-        assert!(plain_mode(false));
+    fn terminal_mode_requires_interactive_input_and_output() {
+        assert!(!plain_mode_for(false, false, true, true, false));
+        assert!(plain_mode_for(false, false, false, true, false));
+        assert!(plain_mode_for(false, false, true, false, false));
+        assert!(plain_mode_for(false, false, false, false, false));
+    }
+
+    #[test]
+    fn explicit_overrides_and_dumb_or_missing_term_are_plain() {
+        assert!(plain_mode_for(true, false, true, true, false));
+        assert!(plain_mode_for(false, true, true, true, false));
+        assert!(plain_mode_for(false, false, true, true, true));
     }
 }
