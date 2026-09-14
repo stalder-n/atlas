@@ -152,3 +152,11 @@ has no V4 clamp and must not replace it. MoeLayer::fused_silu_quant_ok
 requires a nonzero handle; when absent, forward_prefill_fp8 uses the shipped
 moe_silu_mul followed by per_token_group_quant_fp8, preserving the clamp.
 The static shadow exemption alone does not declare this runtime probe absent."""
+
+[expected_absent.prefill_attn_compressed_tc]
+prefill_attn_compressed_tc = """
+Opt-in V4-specific 15-argument compressed-attention kernel. Older or reduced
+kernel bundles may omit this module. Initialization probes only for V4 with
+ATLAS_V4_COMPRESSED_ATTN_TC enabled; dispatch checks the nonzero handle and
+supported shape before launch and retains prefill_attn_compressed otherwise.
+This declaration exempts absence only, never a launch failure."""

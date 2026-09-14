@@ -533,6 +533,20 @@ impl Qwen3AttentionLayer {
                 "prefill_attn_compressed",
                 "prefill_attn_compressed",
             ),
+            prefill_attn_compressed_tc_k: if probes.compressed_attn
+                && config.model_type == "deepseek_v4"
+                && cfg!(feature = "cuda")
+                && !cfg!(atlas_scale)
+                && crate::layers::ops::ModelLevers::get().v4_compressed_attn_tc
+            {
+                super::super::try_kernel(
+                    gpu,
+                    "prefill_attn_compressed_tc",
+                    "prefill_attn_compressed_tc",
+                )
+            } else {
+                spark_runtime::gpu::KernelHandle(0)
+            },
             v4_comp_pool_filled: std::sync::atomic::AtomicU32::new(0),
             v4_comp_prev_valid: std::sync::atomic::AtomicBool::new(false),
             v4_decode_started: std::sync::atomic::AtomicBool::new(false),

@@ -5,6 +5,7 @@
 use std::path::Path;
 
 const OPTIONAL_PROBES: &[(&str, &str)] = &[
+    ("prefill_attn_compressed_tc", "prefill_attn_compressed_tc"),
     ("inferspark_prefill_512tc", "inferspark_prefill_512tc"),
     ("moe_silu_mul", "silu_mul_quant_fp8"),
 ];

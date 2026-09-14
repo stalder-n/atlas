@@ -603,8 +603,19 @@ impl Qwen3AttentionLayer {
             // offset + accumulate — an inc-3 concern alongside decode-append.)
             self.v4_comp_pool_filled
                 .store(n_win, std::sync::atomic::Ordering::Relaxed);
-            KernelLaunch::new(ctx.gpu, self.prefill_attn_compressed_k)
-                .grid([nq, n.div_ceil(16), 1])
+            // Optional kernel exists only in the GB10 V4 target. Decide fallback
+            // before launch; an execution failure must propagate to the caller.
+            let (attention_kernel, query_rows) = super::v4_compressed_attention::select_kernel(
+                ctx.levers.v4_compressed_attn_tc,
+                self.prefill_attn_compressed_k,
+                self.prefill_attn_compressed_tc_k,
+                hd_mla,
+                nq,
+                nkv,
+                ratio,
+            );
+            KernelLaunch::new(ctx.gpu, attention_kernel)
+                .grid([nq, n.div_ceil(query_rows), 1])
                 .block([128, 1, 1])
                 .arg_ptr(q_full)
                 .arg_ptr(k_out)
