@@ -422,6 +422,15 @@ fn skip_mtp(args: &cli::ServeArgs, config: &ModelConfig) -> bool {
         || (config.model_type == "deepseek_v4" && !args.speculative)
 }
 
+/// Will the model's weight loader bind a vision encoder?
+///
+/// Unresolvable model types answer `true`: never skip weights on a guess.
+fn binds_vision(config: &atlas_core::config::ModelConfig) -> bool {
+    spark_model::factory::loader_for_config(config)
+        .map(|l| l.binds_vision_encoder())
+        .unwrap_or(true)
+}
+
 #[cfg(test)]
 mod draft_loading_tests {
     use super::*;
@@ -450,13 +459,4 @@ mod draft_loading_tests {
         config.model_type = "qwen4_exp".into();
         assert!(skip_mtp(&args, &config));
     }
-}
-
-/// Will the model's weight loader bind a vision encoder?
-///
-/// Unresolvable model types answer `true`: never skip weights on a guess.
-fn binds_vision(config: &atlas_core::config::ModelConfig) -> bool {
-    spark_model::factory::loader_for_config(config)
-        .map(|l| l.binds_vision_encoder())
-        .unwrap_or(true)
 }
