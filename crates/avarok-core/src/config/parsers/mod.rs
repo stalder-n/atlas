@@ -4,6 +4,7 @@
 //! budget.
 
 mod deepseek_v4;
+mod deepseek_v4_vision;
 mod gemma4;
 mod glm5_next;
 mod kimi_k3;

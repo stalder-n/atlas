@@ -8,6 +8,7 @@
 
 use super::*;
 use crate::video_decode_ffmpeg::FfmpegPolicy;
+use avarok_core::config::VisionFlavor;
 
 /// The default: no subprocess. Every GIF case must pass without it, which is
 /// the guarantee that the pure-Rust path is not quietly depending on ffmpeg.
@@ -29,6 +30,12 @@ fn cfg() -> VisionConfig {
         image_pad_token_id: 248_056,
         video_pad_token_id: 248_057,
         max_pixels: None,
+        // Qwen tower: the four DS-only numerics are sentinels, not bounds.
+        flavor: VisionFlavor::Qwen,
+        rope_theta: 10000.0,
+        max_n_token: 0,
+        min_pixels: 0,
+        max_wh_ratio: 0,
     }
 }
 

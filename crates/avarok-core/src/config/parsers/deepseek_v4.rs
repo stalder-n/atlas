@@ -176,6 +176,11 @@ pub fn parse_deepseek_v4(json: &str) -> Result<ModelConfig> {
         config.mtp_num_hidden_layers = n as usize;
     }
 
+    // Vision tower (DeepSeek-V4-Flash-Vision-Exp): FLAT `vision_*` keys, so
+    // `parsers::vision` never sees it. `vision_n_layers > 0` is the
+    // reference's own `vl` flag; when set, every other key is required (PCND).
+    config.vision = super::deepseek_v4_vision::parse(&raw, config.hidden_size)?;
+
     validate_dspark_contract(&config, &raw)?;
 
     // Parse quantization_config if present

@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use super::super::{ModelConfig, VisionConfig};
+use super::super::{ModelConfig, VisionConfig, VisionFlavor};
 
 pub(crate) fn parse_vision_config(raw: &serde_json::Value) -> Option<VisionConfig> {
     let vc = raw.get("vision_config")?;
@@ -56,5 +56,13 @@ pub(crate) fn parse_vision_config(raw: &serde_json::Value) -> Option<VisionConfi
         // installed by the server right after config load, before the encoder
         // is built. `None` here means "not yet resolved", never "unbounded".
         max_pixels: None,
+        flavor: VisionFlavor::Qwen,
+        // The four numerics below are DeepSeek-only. 10000.0 is the Qwen
+        // family's implicit RoPE base; 0 is a SENTINEL meaning "this tower
+        // has no such knob" — never "unbounded".
+        rope_theta: 10000.0,
+        max_n_token: 0,
+        min_pixels: 0,
+        max_wh_ratio: 0,
     })
 }
