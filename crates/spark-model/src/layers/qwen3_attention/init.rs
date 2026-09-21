@@ -641,7 +641,7 @@ impl Qwen3AttentionLayer {
             prefill_attn_compressed_tc_k: if probes.compressed_attn
                 && config.model_type == "deepseek_v4"
                 && cfg!(feature = "cuda")
-                && !cfg!(atlas_scale)
+                && !cfg!(avarok_scale)
                 && crate::layers::ops::ModelLevers::get().v4_compressed_attn_tc
             {
                 super::super::try_kernel(
