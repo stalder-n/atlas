@@ -58,6 +58,30 @@ csa_compress = "csa_compress"
 prefill_attn_compressed = "prefill_attn_compressed"
 prefill_attn_compressed_tc = "prefill_attn_compressed_tc"
 
+# ── DeepSeek-V4-Flash-Vision-Exp vision path ────────────────────────────────
+# All four are stem-identity and therefore functionally optional (an unlisted
+# .cu uses its stem); they are written out because this file's convention is to
+# name every module it ships, and because each carries provenance.
+#
+# NOTE: this file is symlinked from kernels/{b200,hopper}/deepseek-v4-flash/
+# nvfp4/KERNEL.toml, so these lines DO reach two other hardware trees. Inert
+# there: build.rs looks the [modules] map up per PRESENT source file, and
+# neither mirror carries these four stems. (check_cross_hardware.py cannot see
+# this reach — it indexes gb10/metal/strix/strix-hip only.) The same applies to
+# kernels/gb10/deepseek-v4.1-flash, which sets kernel_source = "deepseek-v4-flash"
+# and therefore compiles these four sources as a second consumer.
+
+# The ViT tower: a SAME-HARDWARE symlink to
+# kernels/gb10/qwen3.6-35b-a3b/nvfp4/vision_encoder.cu, which is this tree's
+# idiom for the file (holo-3.1-*, ornith-1.0-9b, qwen3.5-27b, qwen3.6-27b and
+# qwen3.8-flash-next all link to the same source). A byte-identical REGULAR
+# copy is not an option: scripts/check_kernel_shadows.py RULE2 fails CI on
+# "identical regular copies of vision_encoder.cu — keep one canonical file,
+# symlink the rest". That does couple this target to a Qwen-motivated ViT
+# edit; diverging is an explicit act — replace the link with a real, different
+# file and update tests/deepseek_v4_kernel_audit.rs in the same commit.
+vision_encoder = "vision_encoder"
+
 # The fused silu_mul_quant_fp8 entry point is deliberately absent from this
 # swiglu_limit shadow of moe_silu_mul.cu: the launch site checks the kernel
 # handle and falls back to the unfused silu_mul → per_token_group_quant_fp8
