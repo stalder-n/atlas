@@ -78,7 +78,18 @@ impl Qwen3AttentionLayer {
 
         // ── 1. Q latent → norm → expand ──
         let q_latent = ctx.buffers.ssm_ba();
-        if use_tc {
+        if self.v4_fp8_projection(
+            ctx,
+            mla.wq_a_fp8.as_ref(),
+            normed,
+            q_latent,
+            n,
+            q_lora,
+            h,
+            stream,
+        )? {
+            // Native weight projection completed.
+        } else if use_tc {
             ops::dense_gemm_tc(
                 ctx.gpu,
                 self.dense_gemm_tc_k,
@@ -121,17 +132,28 @@ impl Qwen3AttentionLayer {
             .synchronize(stream)
             .map_err(|e| anyhow::anyhow!("V4 attn: q_a_norm sync failed: {e}"))?;
         let q_full = ctx.buffers.qkv_output();
-        ops::dense_gemm(
-            ctx.gpu,
-            self.dense_gemm_k,
+        if !self.v4_fp8_projection(
+            ctx,
+            mla.wq_b_fp8.as_ref(),
             q_latent,
-            &mla.wq_b,
             q_full,
             n,
             nq * hd_mla,
             q_lora,
             stream,
-        )?;
+        )? {
+            ops::dense_gemm(
+                ctx.gpu,
+                self.dense_gemm_k,
+                q_latent,
+                &mla.wq_b,
+                q_full,
+                n,
+                nq * hd_mla,
+                q_lora,
+                stream,
+            )?;
+        }
         ctx.gpu
             .synchronize(stream)
             .map_err(|e| anyhow::anyhow!("V4 attn: q_full gemm sync failed: {e}"))?;
@@ -183,20 +205,16 @@ impl Qwen3AttentionLayer {
         // bug exposed once the upstream norms were corrected. Use the scalar
         // dense_gemm path for wkv until the TC kernel is fixed. wq_a above is
         // unaffected (TC output is correct there).
-        #[allow(clippy::overly_complex_bool_expr)]
-        if false && use_tc {
-            ops::dense_gemm_tc(
-                ctx.gpu,
-                self.dense_gemm_tc_k,
-                normed,
-                &mla.wkv_a,
-                kv_latent, // Write to kv_latent for cache assembly
-                n,
-                kv_lora,
-                h,
-                stream,
-            )?;
-        } else {
+        if !self.v4_fp8_projection(
+            ctx,
+            mla.wkv_a_fp8.as_ref(),
+            normed,
+            kv_latent,
+            n,
+            kv_lora,
+            h,
+            stream,
+        )? {
             ops::dense_gemm(
                 ctx.gpu,
                 self.dense_gemm_k,
@@ -585,8 +603,19 @@ impl Qwen3AttentionLayer {
             // offset + accumulate — an inc-3 concern alongside decode-append.)
             self.v4_comp_pool_filled
                 .store(n_win, std::sync::atomic::Ordering::Relaxed);
-            KernelLaunch::new(ctx.gpu, self.prefill_attn_compressed_k)
-                .grid([nq, n.div_ceil(16), 1])
+            // Optional kernel exists only in the GB10 V4 target. Decide fallback
+            // before launch; an execution failure must propagate to the caller.
+            let (attention_kernel, query_rows) = super::v4_compressed_attention::select_kernel(
+                ctx.levers.v4_compressed_attn_tc,
+                self.prefill_attn_compressed_k,
+                self.prefill_attn_compressed_tc_k,
+                hd_mla,
+                nq,
+                nkv,
+                ratio,
+            );
+            KernelLaunch::new(ctx.gpu, attention_kernel)
+                .grid([nq, n.div_ceil(query_rows), 1])
                 .block([128, 1, 1])
                 .arg_ptr(q_full)
                 .arg_ptr(k_out)
@@ -799,42 +828,65 @@ impl Qwen3AttentionLayer {
         let latent_dim = o_groups * o_lora;
         let o_latent = ctx.buffers.o_latent();
         let o_out = ctx.buffers.qkv_output();
-        for t in 0..n {
-            for g in 0..o_groups {
-                let in_g = attn_out.offset(((t * nq * hd_mla) + g * group_in) as usize * 2);
-                let w_g = crate::weight_map::DenseWeight {
-                    weight: mla
-                        .wo_a
-                        .weight
-                        .offset((g as usize) * (o_lora as usize) * (group_in as usize) * 2),
-                };
-                let out_g = o_latent.offset(((t * latent_dim) + g * o_lora) as usize * 2);
-                ops::dense_gemv(
-                    ctx.gpu,
-                    self.dense_gemv_k,
-                    in_g,
-                    &w_g,
-                    out_g,
-                    o_lora,
-                    group_in,
-                    stream,
-                )?;
+        if !self.v4_fp8_grouped_projection(
+            ctx,
+            mla.wo_a_fp8.as_ref(),
+            attn_out,
+            o_latent,
+            n,
+            o_groups,
+            o_lora,
+            group_in,
+            stream,
+        )? {
+            for t in 0..n {
+                for g in 0..o_groups {
+                    let in_g = attn_out.offset(((t * nq * hd_mla) + g * group_in) as usize * 2);
+                    let w_g = crate::weight_map::DenseWeight {
+                        weight: mla
+                            .wo_a
+                            .weight
+                            .offset((g as usize) * (o_lora as usize) * (group_in as usize) * 2),
+                    };
+                    let out_g = o_latent.offset(((t * latent_dim) + g * o_lora) as usize * 2);
+                    ops::dense_gemv(
+                        ctx.gpu,
+                        self.dense_gemv_k,
+                        in_g,
+                        &w_g,
+                        out_g,
+                        o_lora,
+                        group_in,
+                        stream,
+                    )?;
+                }
             }
         }
         ctx.gpu
             .synchronize(stream)
             .map_err(|e| anyhow::anyhow!("V4 attn: wo_a grouped gemv sync failed: {e}"))?;
-        ops::dense_gemm(
-            ctx.gpu,
-            self.dense_gemm_k,
+        if !self.v4_fp8_projection(
+            ctx,
+            mla.wo_b_fp8.as_ref(),
             o_latent,
-            &mla.wo_b,
             o_out,
             n,
             h,
             latent_dim,
             stream,
-        )?;
+        )? {
+            ops::dense_gemm(
+                ctx.gpu,
+                self.dense_gemm_k,
+                o_latent,
+                &mla.wo_b,
+                o_out,
+                n,
+                h,
+                latent_dim,
+                stream,
+            )?;
+        }
         ctx.gpu
             .synchronize(stream)
             .map_err(|e| anyhow::anyhow!("V4 attn: wo_b gemm sync failed: {e}"))?;

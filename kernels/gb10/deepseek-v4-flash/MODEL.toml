@@ -1,6 +1,8 @@
 [model]
 name = "deepseek-v4-flash"
-hf_id = "RedHatAI/DeepSeek-V4-Flash-NVFP4-FP8"
+# Representative checkpoint metadata; runtime dimensions come from config.json.
+# The 0731 profile is constrained to 2048 tokens pending GPU validation.
+hf_id = "nvidia/DeepSeek-V4-Flash-0731-NVFP4"
 params = "284B"
 active_params = "13B"
 architecture = "MLA + MoE + mHC + Hybrid Attention (CSA/HCA)"
@@ -15,8 +17,9 @@ kv_heads = 1
 intermediate_size = 2048
 
 vocab_size = 129280
-max_position_embeddings = 131072
-rope_theta = 160000
+max_position_embeddings = 1048576
+# Base RoPE; compression RoPE uses 160000 from checkpoint config.
+rope_theta = 10000
 partial_rotary_factor = 0.125
 
 # MLA-specific
@@ -33,8 +36,9 @@ num_shared_experts = 1
 moe_intermediate_size = 2048
 top_k = 6
 
-# MTP (Multi-Module Token Prediction)
-mtp_layers = 5
+# Legacy num_nextn_predict_layers metadata. Native 0731 DSpark has three
+# stages and K=5 proposals; K is not a layer count. DSpark is not implemented.
+mtp_layers = 1
 
 # Hyper-Connections (mHC)
 hc_mult = 4
@@ -51,7 +55,8 @@ yarn_original_max_position_embeddings = 65536
 model_type = "deepseek_v4"
 
 # DeepSeek V4 Flash uses hybrid attention (CSA/HCA) with compress_ratios.
-# Currently falls back to full_attention; hybrid support is pending.
+# Compression runs eagerly; per-query sparse selection and general request
+# state handling remain incomplete. The server enforces constrained bring-up.
 # o_lora_rank > 0 distinguishes Flash from V3/V4-Pro.
 
 # Recommended sampling (DeepSeek V4 family defaults).
@@ -92,7 +97,7 @@ fp8_kv_calibration_tokens = 256
 # that probes the handle and the resolved fallback it falls back to; none
 # are silenced speculatively.
 
-[expected_absent.prefill_attn]
+[expected_absent.inferspark_prefill_512tc]
 inferspark_prefill_512tc = """
 Tensor-core HDIM=512 prefill, an instantiation of the shared
 `inferspark_prefill` at BC=16. `ops::wide_prefill_kernel` probes for it on every
@@ -138,3 +143,20 @@ the compressed-MLA path instead: run_paged_decode.rs routes
 KvCacheDtype::Fp8 with the V4-Flash rope config to
 mla_paged_decode_fp8 (resolves here) BEFORE the generic arms, so this
 handle can never fire as served."""
+
+[expected_absent.moe_silu_mul]
+silu_mul_quant_fp8 = """
+Intentionally omitted by this target's SwiGLU-clamped moe_silu_mul shadow,
+as recorded in nvfp4/KERNEL.toml [shadow_exempt]. The common fused kernel
+has no V4 clamp and must not replace it. MoeLayer::fused_silu_quant_ok
+requires a nonzero handle; when absent, forward_prefill_fp8 uses the shipped
+moe_silu_mul followed by per_token_group_quant_fp8, preserving the clamp.
+The static shadow exemption alone does not declare this runtime probe absent."""
+
+[expected_absent.prefill_attn_compressed_tc]
+prefill_attn_compressed_tc = """
+Opt-in V4-specific 15-argument compressed-attention kernel. Older or reduced
+kernel bundles may omit this module. Initialization probes only for V4 with
+ATLAS_V4_COMPRESSED_ATTN_TC enabled; dispatch checks the nonzero handle and
+supported shape before launch and retains prefill_attn_compressed otherwise.
+This declaration exempts absence only, never a launch failure."""

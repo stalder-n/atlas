@@ -198,7 +198,12 @@ impl GrammarData {
     /// Decode a `ByteString` expression to its `String`.
     pub fn byte_string(&self, expr_id: i32) -> String {
         let e = self.expr(expr_id);
-        e.data.iter().map(|&b| (b as u8) as char).collect()
+        let bytes: Vec<u8> = e.data.iter().map(|&b| b as u8).collect();
+        // TagDispatch consumes textual UTF-8 delimiters. Mapping each byte to
+        // a Unicode scalar double-encodes non-ASCII markers such as DSML.
+        // Preserve the historical byte mapping for non-UTF-8 byte literals.
+        String::from_utf8(bytes)
+            .unwrap_or_else(|error| error.into_bytes().into_iter().map(char::from).collect())
     }
 
     /// Decode a `TagDispatch` expression. Panics if `expr_id` is not a
@@ -285,5 +290,45 @@ mod tests {
         assert_eq!(g.root_rule_id(), 0);
         assert_eq!(g.root_rule().name, "root");
         assert_eq!(g.root_rule().body_expr_id, 0);
+    }
+}
+
+#[cfg(test)]
+mod unicode_tests {
+    use crate::grammar::builder::{GrammarBuilder, TagDispatchSpec};
+
+    #[test]
+    fn tag_dispatch_preserves_utf8_markers_and_exclusions() {
+        let mut builder = GrammarBuilder::new();
+        let empty = builder.add_empty_str();
+        let target = builder.add_rule_named("target", empty).unwrap();
+        let marker = "<｜DSML｜tool_calls>";
+        let close = "</｜DSML｜parameter>";
+        let expr = builder.add_tag_dispatch(&TagDispatchSpec {
+            tag_rule_pairs: vec![(marker.into(), target)],
+            stop_eos: true,
+            stop_str: vec!["停止".into()],
+            loop_after_dispatch: true,
+            excluded_str: vec![close.into()],
+        });
+        builder.add_rule_named("root", expr).unwrap();
+        let grammar = builder.get("root").unwrap();
+        let dispatch = grammar.tag_dispatch(expr);
+        assert_eq!(dispatch.tag_rule_pairs[0].0, marker);
+        assert_eq!(dispatch.excluded_str, [close]);
+        assert_eq!(dispatch.stop_str, ["停止"]);
+    }
+}
+
+#[cfg(test)]
+mod raw_byte_tests {
+    use crate::grammar::builder::GrammarBuilder;
+
+    #[test]
+    fn invalid_utf8_byte_string_retains_legacy_mapping() {
+        let mut builder = GrammarBuilder::new();
+        let bytes = builder.add_byte_string_bytes(&[255]);
+        builder.add_rule_named("root", bytes).unwrap();
+        assert_eq!(builder.get("root").unwrap().byte_string(bytes), "ÿ");
     }
 }

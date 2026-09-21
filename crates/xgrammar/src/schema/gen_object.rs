@@ -4,7 +4,8 @@
 // and the property-formatting hooks, plus the XML overrides.
 
 use super::converter::{JsonSchemaConverter, xml_wrapper};
-use super::error::SchemaResult;
+use super::error::{SchemaError, SchemaResult};
+use super::options::JsonFormat;
 use super::spec::{ObjectSpec, SchemaSpec, SchemaSpecPtr, SpecKind};
 use crate::regex::regex_to_ebnf;
 
@@ -22,6 +23,12 @@ impl<'p> JsonSchemaConverter<'p> {
     /// Format a `key: value` property. Port of `FormatProperty` plus
     /// the XML override.
     pub(super) fn format_property(&self, key: &str, value_rule: &str) -> String {
+        if self.format == JsonFormat::DeepSeekXml && self.at_xml_layer() {
+            let prefix =
+                serde_json::to_string(&format!("<｜DSML｜parameter name=\"{key}\" string=\""))
+                    .expect("string serialization");
+            return format!("{prefix} {value_rule} \"</｜DSML｜parameter>\" [\\n]*");
+        }
         if self.at_xml_layer() {
             let (prefix, suffix, param_suffix) = xml_wrapper(self.format);
             let ws = self.whitespace_pattern();
@@ -37,6 +44,11 @@ impl<'p> JsonSchemaConverter<'p> {
     /// Format an additional/unevaluated property. Port of
     /// `FormatOtherProperty` plus the XML override.
     pub(super) fn format_other_property(&self, key_pattern: &str, value_rule: &str) -> String {
+        if self.format == JsonFormat::DeepSeekXml && self.at_xml_layer() {
+            return format!(
+                r#""<｜DSML｜parameter name=\"" {key_pattern} "\" string=\"" {value_rule} "</｜DSML｜parameter>" [\n]*"#
+            );
+        }
         if self.at_xml_layer() {
             let (prefix, suffix, param_suffix) = xml_wrapper(self.format);
             let ws = self.whitespace_pattern();
@@ -72,6 +84,17 @@ impl<'p> JsonSchemaConverter<'p> {
         rule_name: &str,
         need_braces: bool,
     ) -> SchemaResult<String> {
+        if self.format == JsonFormat::DeepSeekXml
+            && self.at_xml_layer()
+            && spec
+                .properties
+                .iter()
+                .any(|property| property.name.chars().any(|c| c == '"' || c.is_control()))
+        {
+            return Err(SchemaError::invalid(
+                "parameter name cannot be represented in a DSML attribute",
+            ));
+        }
         let mut result = String::new();
         if need_braces {
             result.push_str("\"{\"");

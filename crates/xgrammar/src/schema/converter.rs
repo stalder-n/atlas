@@ -62,6 +62,7 @@ pub struct JsonSchemaConverter<'p> {
     pub(super) any_whitespace: bool,
     pub(super) max_whitespace_cnt: Option<i32>,
     pub(super) format: JsonFormat,
+    pub(super) dsml_refs: Vec<String>,
     /// Saved snapshot of `indent`, restored after basic-rule setup.
     pub(super) saved_indent: Option<IndentManager>,
     /// `cache_key` -> rule name. The C++ keys this on
@@ -103,6 +104,7 @@ impl<'p> JsonSchemaConverter<'p> {
             any_whitespace: options.any_whitespace,
             max_whitespace_cnt: options.max_whitespace_cnt,
             format: options.json_format,
+            dsml_refs: Vec::new(),
             saved_indent: None,
             cache_outer: HashMap::new(),
             cache_inner: HashMap::new(),
@@ -194,6 +196,11 @@ impl<'p> JsonSchemaConverter<'p> {
             self.nested_object_level = 0;
             let root_rule_name = self.script.allocate_rule_name("root");
             let body = self.generate_from_spec(spec, &root_rule_name)?;
+            let body = if self.format == JsonFormat::DeepSeekXml && body.trim().is_empty() {
+                "\"\"".to_string()
+            } else {
+                body
+            };
             self.script
                 .add_rule_with_allocated_name(&root_rule_name, &body);
             return Ok(self.script.get_script());
@@ -346,6 +353,9 @@ impl<'p> JsonSchemaConverter<'p> {
     /// Create a rule for `spec` (or return a cached rule name) and
     /// return its name. Port of `CreateRule`.
     pub(super) fn create_rule(&mut self, spec: &SchemaSpecPtr, hint: &str) -> SchemaResult<String> {
+        if self.format == JsonFormat::DeepSeekXml && self.nested_object_level == 1 {
+            return self.create_dsml_value_rule(spec, hint);
+        }
         if let Some(cached) = self.get_cache(&spec.cache_key) {
             return Ok(cached);
         }

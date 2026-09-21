@@ -249,13 +249,19 @@ pub(crate) fn resolve_tokenizer_runtime(
             .map(|s| s.to_string())
     });
     let (tc_start_str, tc_end_str): (&str, &str) = match tool_call_format_name.as_deref() {
+        Some("deepseek_v4" | "dsml") => (
+            crate::tool_parser::DSML_OPEN,
+            crate::tool_parser::DSML_CLOSE,
+        ),
         Some("minimax_xml") => ("<minimax:tool_call>", "</minimax:tool_call>"),
         _ => ("<tool_call>", "</tool_call>"),
     };
-    let tool_call_start_token = tokenizer
-        .encode(tc_start_str)
-        .ok()
-        .and_then(|ids| if ids.len() == 1 { Some(ids[0]) } else { None });
+    let tool_call_start_token = tokenizer.inner().token_to_id(tc_start_str).or_else(|| {
+        tokenizer
+            .encode(tc_start_str)
+            .ok()
+            .and_then(|ids| if ids.len() == 1 { Some(ids[0]) } else { None })
+    });
     if let Some(tid) = tool_call_start_token {
         tracing::info!("Tool call start token: {} ({})", tid, tc_start_str);
     } else {
@@ -264,10 +270,12 @@ pub(crate) fn resolve_tokenizer_runtime(
              require_tool_call / suppress / force-emit-after-think will be no-ops"
         );
     }
-    let tool_call_end_token = tokenizer
-        .encode(tc_end_str)
-        .ok()
-        .and_then(|ids| if ids.len() == 1 { Some(ids[0]) } else { None });
+    let tool_call_end_token = tokenizer.inner().token_to_id(tc_end_str).or_else(|| {
+        tokenizer
+            .encode(tc_end_str)
+            .ok()
+            .and_then(|ids| if ids.len() == 1 { Some(ids[0]) } else { None })
+    });
     if let Some(tid) = tool_call_end_token {
         tracing::info!("Tool call end token: {} ({})", tid, tc_end_str);
     }
