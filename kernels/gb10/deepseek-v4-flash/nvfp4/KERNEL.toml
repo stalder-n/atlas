@@ -59,27 +59,20 @@ prefill_attn_compressed = "prefill_attn_compressed"
 prefill_attn_compressed_tc = "prefill_attn_compressed_tc"
 
 # ── DeepSeek-V4-Flash-Vision-Exp vision path ────────────────────────────────
-# All four are stem-identity and therefore functionally optional (an unlisted
-# .cu uses its stem); they are written out because this file's convention is to
-# name every module it ships, and because each carries provenance.
+# All four are stem-identity (an unlisted .cu already uses its stem); they are
+# spelled out because this file names every module it ships.
 #
 # NOTE: this file is symlinked from kernels/{b200,hopper}/deepseek-v4-flash/
-# nvfp4/KERNEL.toml, so these lines DO reach two other hardware trees. Inert
+# nvfp4/KERNEL.toml, so these lines reach two other hardware trees. Inert
 # there: build.rs looks the [modules] map up per PRESENT source file, and
-# neither mirror carries these four stems. (check_cross_hardware.py cannot see
-# this reach — it indexes gb10/metal/strix/strix-hip only.) The same applies to
-# kernels/gb10/deepseek-v4.1-flash, which sets kernel_source = "deepseek-v4-flash"
-# and therefore compiles these four sources as a second consumer.
+# neither mirror carries these four stems. kernels/gb10/deepseek-v4.1-flash
+# sets kernel_source = "deepseek-v4-flash" and so compiles these sources too.
 
-# The ViT tower: a SAME-HARDWARE symlink to
-# kernels/gb10/qwen3.6-35b-a3b/nvfp4/vision_encoder.cu, which is this tree's
-# idiom for the file (holo-3.1-*, ornith-1.0-9b, qwen3.5-27b, qwen3.6-27b and
-# qwen3.8-flash-next all link to the same source). A byte-identical REGULAR
-# copy is not an option: scripts/check_kernel_shadows.py RULE2 fails CI on
-# "identical regular copies of vision_encoder.cu — keep one canonical file,
-# symlink the rest". That does couple this target to a Qwen-motivated ViT
-# edit; diverging is an explicit act — replace the link with a real, different
-# file and update tests/deepseek_v4_kernel_audit.rs in the same commit.
+# The ViT tower: a same-hardware symlink to
+# kernels/gb10/qwen3.6-35b-a3b/nvfp4/vision_encoder.cu — the tree's idiom for
+# this file, and required: check_kernel_shadows.py RULE2 fails CI on identical
+# regular copies of it. Diverging is an explicit act — replace the link with a
+# real, different file and update tests/deepseek_v4_kernel_audit.rs with it.
 vision_encoder = "vision_encoder"
 # DeepSeek ViT/aligner element ops: 3x3 pixel unshuffle, exact-erf GELU
 # (NOT the tanh approximation vision_gelu uses), unclamped SwiGLU split.

@@ -7,14 +7,13 @@
 // feeds the aligner, the ViT MLP activation, and the aligner's SwiGLU.
 //
 // These three ops are the ONLY places the DeepSeek tower differs elementwise
-// from the Qwen tower in `vision_encoder.cu` (copied verbatim into this
-// target). Everything else — GEMMs, LayerNorm, RoPE/SDPA, the f32->bf16
+// from the Qwen tower in `vision_encoder.cu` (symlinked into this target).
+// Everything else — GEMMs, LayerNorm, RoPE/SDPA, the f32->bf16
 // copies — is shared with that file.
 //
-// BF16 storage, f32 accumulation, `__restrict__` on every pointer, no `-DHDIM`
-// dependence. Each kernel runs once (unshuffle/SwiGLU) or once per ViT block
-// (GELU) per image, so simplicity beats peak bandwidth here — same posture as
-// `vision_encoder.cu`.
+// BF16 storage, f32 accumulation. Each kernel runs once (unshuffle/SwiGLU) or
+// once per ViT block (GELU) per image, so simplicity beats peak bandwidth here
+// — the same posture as `vision_encoder.cu`.
 
 #include <cuda_bf16.h>
 #include <math.h>
@@ -50,12 +49,10 @@ extern "C" __global__ void ds_vision_unshuffle3(
     const unsigned int width = dim * 9u;   // <= 1024*9 = 9216 for the Exp tower
 
     for (unsigned int i = threadIdx.x; i < width; i += blockDim.x) {
-        // ── the single most likely wrong-by-copy line in this file ──
-        // The contract's feature layout is `c*9 + kh*3 + kw`, i.e. the CHANNEL
-        // is the slow axis and the 3x3 tap is the fast one. That is the
-        // TRANSPOSE of `vision_spatial_merge`, which decomposes its linear
-        // index as `p_local = pi / D, d = pi % D` (patch slow, feature fast).
-        // Do not "harmonise" the two.
+        // The feature layout is `c*9 + kh*3 + kw`: CHANNEL is the slow axis,
+        // the 3x3 tap the fast one. That is the TRANSPOSE of
+        // `vision_spatial_merge` (`p_local = pi / D, d = pi % D`, patch slow,
+        // feature fast) — do not "harmonise" the two.
         const unsigned int c  = i / 9u;
         const unsigned int k  = i % 9u;
         const unsigned int kh = k / 3u;
@@ -83,9 +80,8 @@ extern "C" __global__ void ds_vision_unshuffle3(
 // IS the erf form; the two differ by ~1e-4 per value and that error compounds
 // across every ViT block.
 //
-// Written as a DIVISION by sqrt(2) rather than a multiply by its reciprocal, to
-// mirror the reference expression exactly. `--fmad=false` is already set for
-// this target in nvfp4/KERNEL.toml, so no contraction reassociates it.
+// A DIVISION by sqrt(2), not a multiply by its reciprocal, to mirror the
+// reference expression exactly.
 //
 // Grid: (ceil(n / 256), 1, 1)   Block: (256, 1, 1)
 extern "C" __global__ void ds_gelu_erf_inplace(

@@ -7,20 +7,18 @@
 //
 // WHY A SEPARATE KERNEL. A prompt that contains image sentinel blocks is not
 // causal inside those blocks: every token of an image span sees every other
-// token of the same span (bidirectional), while text stays causal. That is a
-// per-query key interval, not a scalar window, so the rule cannot be expressed
-// in the scalar kernel's `sliding_window` argument.
+// token of the same span, while text stays causal. That is a per-query key
+// interval, not a scalar window, so it cannot be expressed in the scalar
+// kernel's `sliding_window` argument.
 //
 // The bounds come from `spark_model::vision_deepseek::visibility::window_bounds`
 // and are INCLUSIVE: query `q` attends raw keys `win_lo[q] ..= win_hi[q]`, with
 // `win_lo[q] <= win_hi[q] < seq_len` guaranteed by the host. For a pure-text
 // query the host emits `lo = (q + 1 >= W) ? q + 1 - W : 0`, `hi = q`, which
-// reproduces the scalar kernel's behaviour exactly — the `sliding_window`
-// scalar is GONE from the signature because the bounds encode it.
+// reproduces the scalar kernel exactly — hence no `sliding_window` argument.
 //
-// Everything else is the original, byte for byte: the compressed arm's
-// `(w+1)*ratio <= q_row+1` visibility, the per-head attention sink, the online
-// softmax, the epilogue.
+// Everything else is the original, byte for byte: the compressed arm, the
+// per-head attention sink, the online softmax, the epilogue.
 //
 // Q/K/V are [S, num_heads, head_dim] (num_kv_heads=1 → MQA broadcast).
 // Compressed K/V are [n_comp, head_dim].
@@ -31,11 +29,9 @@
 //
 // WARP SAFETY. `q_row = q_block*16 + tid/8` is uniform across each aligned
 // group of 8 lanes, and the `__shfl_xor_sync` masks below (1/2/4) only exchange
-// inside that group, so per-query trip counts stay uniform among actual shuffle
-// partners even though different groups now walk different key ranges — the
-// same property the scalar kernel relies on. Do NOT "fix" the over-broad
-// `0xFFFFFFFF` membermask: narrowing it would change which lanes are required
-// to arrive, and the groups are already independent.
+// inside that group, so trip counts stay uniform among actual shuffle partners
+// even though different groups now walk different key ranges — the same
+// property the scalar kernel relies on.
 
 #include <cuda_bf16.h>
 

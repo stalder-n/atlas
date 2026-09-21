@@ -18,10 +18,9 @@
 //!
 //! ★ THIS TEST IS `#[ignore]` AND VACUOUS ON A STUB BUILD. It reads the PTX
 //! baked into the binary, and `AVAROK_SKIP_BUILD=1` (every host without nvcc,
-//! including CI) bakes none. It runs on the Spark, via
-//! `cargo test -- --ignored`. The host-runnable mirror of the V4 vision pins
-//! below — the same numbers re-derived from the `.cu` SOURCES instead of from
-//! PTX — lives in `deepseek_v4_kernel_audit.rs`
+//! including CI) bakes none; it runs on the Spark via
+//! `cargo test -- --ignored`. The V4 vision pins below are mirrored from the
+//! `.cu` SOURCES — host-runnable — in `deepseek_v4_kernel_audit.rs`
 //! (`v4_vision_kernel_arities_match_the_pins`). Change one, change the other.
 
 /// (module, kernel, expected .param count) for every kernel in the launch
@@ -49,17 +48,12 @@ const PINS: &[(&str, &str, usize)] = &[
     ("transpose_u8", "transpose_u8", 4),
     // ── ViT tower ───────────────────────────────────────────────────────────
     // These pins apply to EVERY target carrying a `vision_encoder` module, not
-    // just the DeepSeek one: qwen3-vl-30b, qwen3.5-122b/397b, qwen3.6-*,
-    // holo-3.1-*, ornith-1.0-9b and the b200/hopper mirrors all resolve here.
-    // Safe today — the tree has exactly THREE real `vision_encoder.cu` files
-    // (qwen3.6-35b-a3b, qwen3-vl-30b-a3b, and deepseek-v4-flash's verbatim copy
-    // of the qwen3.6 one), and every name they share has the same arity;
-    // qwen3-vl simply lacks four of the thirteen, which this table skips
-    // because a missing kernel is the audit's business, not this test's.
-    //
-    // THE COUPLING IS INTENTIONAL. A future Qwen-only parameter addition will
-    // now fail this pin on the DeepSeek target too. That is the point: update
-    // the launcher AND the pin together rather than carving out an exception.
+    // just the DeepSeek one. The coupling is intentional: the tree has two
+    // real `vision_encoder.cu` files (qwen3.6-35b-a3b, which deepseek-v4-flash
+    // symlinks, and qwen3-vl-30b-a3b), every shared name has the same arity,
+    // and a Qwen-side parameter addition SHOULD fail here until every launcher
+    // is updated with it. qwen3-vl lacks four of the thirteen; a missing kernel
+    // is the audit's business, not this test's, so the table skips it.
     ("vision_encoder", "vision_gemm_bias", 7),
     ("vision_encoder", "vision_gemm_bias_nn", 7),
     ("vision_encoder", "vision_add_bias", 4),
@@ -129,9 +123,8 @@ fn expected_arity(model: &str, module: &str, kernel: &str, family_pin: usize) ->
 /// Count `.param` declarations of a PTX `.entry` by name.
 fn ptx_param_count(ptx: &str, kernel: &str) -> Option<usize> {
     // `.visible .entry <name>(` then `.param ...` lines until `)`.
-    // The needle includes the opening paren, so `prefill_attn_compressed(`
-    // cannot match `prefill_attn_compressed_vis` — the pins for the three
-    // siblings above stay independent.
+    // The needle includes the paren, so `prefill_attn_compressed(` cannot
+    // match its `_tc`/`_vis` siblings.
     let needle = format!(".entry {kernel}(");
     let start = ptx.find(&needle)?;
     let body = &ptx[start..];
