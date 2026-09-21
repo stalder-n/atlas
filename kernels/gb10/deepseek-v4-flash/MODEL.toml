@@ -51,6 +51,18 @@ yarn_beta_fast = 32.0
 yarn_beta_slow = 1.0
 yarn_original_max_position_embeddings = 65536
 
+# ── Vision (DeepSeek-V4-Flash-Vision-Exp) ──────────────────────────────────
+# The 2026-08-31 Vision-Exp release continued-trains this checkpoint with a
+# native ViT + aligner; the official FP8/fp4 packing and the s-zaizen NVFP4
+# repack share the tensor names, so ONE kernel target serves both the text
+# (0731) checkpoints and Vision-Exp. Vision presence is decided at RUNTIME
+# from config.json (`vision_n_layers > 0`), never from this key.
+#
+# NOTE: `vision` has NO Rust reader on this tree — `grep '"vision"'` over
+# crates/avarok-kernels/ is empty. It is set for documentation parity with
+# qwen3.6-35b-a3b/MODEL.toml and qwen3-vl-30b-a3b/MODEL.toml, nothing more.
+vision = true
+
 [[model_types]]
 model_type = "deepseek_v4"
 
@@ -160,3 +172,22 @@ kernel bundles may omit this module. Initialization probes only for V4 with
 ATLAS_V4_COMPRESSED_ATTN_TC enabled; dispatch checks the nonzero handle and
 supported shape before launch and retains prefill_attn_compressed otherwise.
 This declaration exempts absence only, never a launch failure."""
+
+# ── vision path: REQUIRED, deliberately NOT declared absent ────────────────
+# U1.4 added four modules (vision_encoder, vision_deepseek,
+# prefill_attn_compressed_vis, moe_router_vl) and NO new [expected_absent]
+# table. That is a decision, not an oversight.
+#
+# qwen3-vl-30b-a3b/MODEL.toml declares [expected_absent.vision_encoder] for
+# vision_add_bias / vit_rope_deinterleave / vit_softmax_rows / vit_scatter_head
+# because ITS OWN vision_encoder.cu defines only 9 entry points. This target
+# symlinks the qwen3.6-35b-a3b file, which defines all 13 — every one of those
+# four RESOLVES here. qwen3.6-35b-a3b/MODEL.toml itself declares no
+# [expected_absent.vision_encoder] for the same reason.
+#
+# Copying qwen3-vl's declarations would therefore be a FALSE ABSENCE: it would
+# tell the boot audit to accept a genuinely missing kernel and serve anyway,
+# which is precisely the failure kernel_probe.rs's audit exists to prevent.
+# There is no fallback for any kernel in the vision path — absence is a boot
+# failure. Pinned host-side by tests/deepseek_v4_kernel_audit.rs
+# (`v4_vision_kernels_are_not_declared_expected_absent`).
