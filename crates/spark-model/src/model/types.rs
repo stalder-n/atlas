@@ -443,6 +443,17 @@ pub struct TransformerModel {
     pub(super) last_mtp_hidden_idx: std::sync::atomic::AtomicUsize,
     /// Optional vision encoder for VL models (Qwen3-VL).
     pub(super) vision_encoder: Option<crate::layers::VisionEncoder>,
+    /// DeepSeek-V4 ViT + aligner. RANK 0 ONLY — rank 1 receives the encoded
+    /// rows over the EP wire instead of loading a second tower.
+    pub(super) vision_encoder_ds: Option<crate::layers::DeepseekVisionEncoder>,
+    /// The aligner rows of the prefill in flight, on BOTH ranks. `None` until
+    /// the first image; allocated and grown from the row count, which both
+    /// ranks learn before the bulk broadcast (there is no derivable capacity
+    /// in the model, so a fixed one would be an invented literal).
+    pub(super) ds_vision_stage: Mutex<Option<super::ep_vision::DsVisionStage>>,
+    /// The four learned `image_{start,pad,newline,end}` vectors, on BOTH
+    /// ranks: the embedding splice runs wherever prefill runs.
+    pub(super) ds_image_params: Option<crate::layers::DsImageParams>,
     /// Number of patches encoded by the last prepare_vision_embed() call.
     /// 0 means no vision embeddings pending.
     pub(super) vision_embed_patches: Mutex<usize>,

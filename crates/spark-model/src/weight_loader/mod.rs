@@ -403,4 +403,29 @@ pub trait ModelWeightLoader {
     ) -> Result<Option<VisionEncoder>> {
         Ok(None)
     }
+
+    /// Load the DeepSeek-V4 ViT tower + aligner (`None` for every other
+    /// family). A SEPARATE hook from [`Self::load_vision_encoder`] because the
+    /// two towers share no structure — see `layers::vision_encoder_ds`.
+    ///
+    /// `build_model` calls this on RANK 0 ONLY; rank 1 never reads the tower.
+    fn load_vision_encoder_ds(
+        &self,
+        _store: &WeightStore,
+        _config: &ModelConfig,
+        _gpu: &dyn GpuBackend,
+    ) -> Result<Option<crate::layers::DeepseekVisionEncoder>> {
+        Ok(None)
+    }
+
+    /// Load the four learned DeepSeek image-block vectors. Called on EVERY
+    /// rank: the embedding splice runs wherever prefill runs.
+    fn load_ds_image_params(
+        &self,
+        _store: &WeightStore,
+        _config: &ModelConfig,
+        _gpu: &dyn GpuBackend,
+    ) -> Result<Option<crate::layers::DsImageParams>> {
+        Ok(None)
+    }
 }

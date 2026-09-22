@@ -9,15 +9,70 @@
 
 #![allow(unused_imports, dead_code, clippy::too_many_arguments)]
 
-use anyhow::Result;
+use anyhow::{Result, bail, ensure};
 
 use super::super::super::types::TransformerModel;
+use crate::model::ep_vision::stage_row_bases;
+use crate::vision_deepseek::geometry::n_llm;
 
 impl TransformerModel {
+    /// Encode this request's images with the DeepSeek tower and stage the
+    /// aligner rows.
+    ///
+    /// Nothing here touches `vision_embed_patches` / `vision_image_grids`: the
+    /// Qwen splice must stay inert, and the DeepSeek splice reads the stage
+    /// plus `block::build_image_block`'s layout instead.
+    fn ds_prepare_vision_embed(
+        &self,
+        enc: &crate::layers::DeepseekVisionEncoder,
+        images: &[crate::VisionItem],
+    ) -> Result<()> {
+        let hidden = self.config.hidden_size;
+        let stream = self.gpu.default_stream();
+        let mut grids = Vec::with_capacity(images.len());
+        for it in images {
+            // `VisionItem` is reused unchanged for DS images, but its temporal
+            // axis is not: video is out of scope for this tower.
+            ensure!(
+                it.groups.len() == 1,
+                "DeepSeek-V4 vision: video input is out of scope (item carries {} temporal \
+                 groups)",
+                it.groups.len()
+            );
+            grids.push((n_llm(it.grid_h, enc.ds), n_llm(it.grid_w, enc.ds)));
+        }
+        let bases = stage_row_bases(&grids);
+        let total: usize = grids.iter().map(|(h, w)| h * w).sum();
+        let rows = self.ds_stage_ensure(total)?;
+
+        let t0 = std::time::Instant::now();
+        for (i, it) in images.iter().enumerate() {
+            let dst = rows.offset(bases[i] * hidden * 2);
+            enc.encode_image(
+                &it.groups[0],
+                it.grid_h,
+                it.grid_w,
+                dst,
+                self.gpu.as_ref(),
+                stream,
+                i,
+            )?;
+        }
+        tracing::info!(
+            "DeepSeek vision encoder: {} images, {total} aligner rows in {:.1}ms",
+            images.len(),
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
+        self.ds_stage_publish(total, grids)
+    }
+
     pub(in crate::model) fn prepare_vision_embed_dispatch(
         &self,
         images: &[crate::VisionItem],
     ) -> Result<()> {
+        if let Some(enc) = self.vision_encoder_ds.as_ref() {
+            return self.ds_prepare_vision_embed(enc, images);
+        }
         let ve = match &self.vision_encoder {
             Some(ve) => ve,
             None => return Ok(()),
@@ -86,6 +141,15 @@ impl TransformerModel {
         &self,
         per_request: &[Vec<crate::VisionItem>],
     ) -> Result<Vec<(usize, usize, usize, usize)>> {
+        if self.vision_encoder_ds.is_some() {
+            // Co-dispatch packs several requests' images into one shared
+            // output buffer and hands each request a row base. The DeepSeek
+            // splice does not read a row base: it derives every row from the
+            // request's OWN `block::build_image_block` layout. The caller
+            // (`phase_start_prefills`) warns and falls back to the per-request
+            // path on this error.
+            bail!("DeepSeek-V4 vision does not support cross-request co-dispatch");
+        }
         let ve = match &self.vision_encoder {
             Some(ve) => ve,
             None => return Ok(Vec::new()),

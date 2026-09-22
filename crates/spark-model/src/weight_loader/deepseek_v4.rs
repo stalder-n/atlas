@@ -12,6 +12,7 @@ mod csa_ape;
 mod load_layers;
 // MTP draft-module loader for nvidia/DeepSeek-V4-Flash-NVFP4.
 mod mtp;
+mod vision;
 pub(crate) use mtp::{DeepseekV4MtpModule, load_v4_mtp_module};
 
 use anyhow::{Context, Result};
@@ -126,5 +127,23 @@ impl ModelWeightLoader for DeepSeekV4WeightLoader {
         _gpu: &dyn GpuBackend,
     ) -> Result<Option<MtpWeights>> {
         Ok(None)
+    }
+
+    fn load_vision_encoder_ds(
+        &self,
+        store: &WeightStore,
+        config: &ModelConfig,
+        gpu: &dyn GpuBackend,
+    ) -> Result<Option<crate::layers::DeepseekVisionEncoder>> {
+        vision::load_vision_tower(store, config, gpu)
+    }
+
+    fn load_ds_image_params(
+        &self,
+        store: &WeightStore,
+        config: &ModelConfig,
+        gpu: &dyn GpuBackend,
+    ) -> Result<Option<crate::layers::DsImageParams>> {
+        vision::load_image_params(store, config, gpu)
     }
 }

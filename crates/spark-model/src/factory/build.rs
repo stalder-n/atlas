@@ -330,6 +330,20 @@ pub fn build_model(
     let vision_encoder = loader.load_vision_encoder(&store, &config, gpu.as_ref())?;
     mem.mark("load_vision_encoder");
 
+    // DeepSeek-V4 vision. The TOWER is rank 0's alone: rank 1 receives the
+    // encoded aligner rows over the EP wire (see `model::ep_vision`), so
+    // reading ~0.9 GiB of `vision.*`/`aligner.*` there would be pure waste.
+    // The four image-block vectors go to BOTH ranks — the embedding splice
+    // runs wherever prefill runs, and they are four vectors, not a tower.
+    let ep_rank = comm.as_ref().map(|c| c.rank()).unwrap_or(0);
+    let vision_encoder_ds = if ep_rank == 0 {
+        loader.load_vision_encoder_ds(&store, &config, gpu.as_ref())?
+    } else {
+        None
+    };
+    let ds_image_params = loader.load_ds_image_params(&store, &config, gpu.as_ref())?;
+    mem.mark("load_vision_encoder_ds");
+
     // A multimodal checkpoint's vision tower is read by the weight loader like
     // everything else, but only a loader that implements `load_vision_encoder`
     // ever binds it. GLM-5.3's port is text-only by design
@@ -355,6 +369,26 @@ pub fn build_model(
                  Text capability is unchanged; image input was already unsupported here.",
                 bytes as f64 / (1024.0 * 1024.0 * 1024.0),
                 config.model_type,
+            );
+        }
+    }
+
+    // The DeepSeek tower under its OWN predicate. The Qwen reclaim above
+    // cannot reach it: its names are `vision.*` / `aligner.*`, none of which
+    // start with `model.visual.` / `model.vision` / `visual.`. This is what
+    // frees the tower on rank 1, which deliberately does not bind it. On rank
+    // 0 `vision_encoder_ds` is `Some` and the tensors are bound zero-copy from
+    // exactly these pointers, so nothing is touched. `image_*` is NOT matched:
+    // both ranks bind those.
+    if vision_encoder_ds.is_none() {
+        let (n, bytes) = store.free_matching(gpu.as_ref(), |name| {
+            name.starts_with("vision.") || name.starts_with("aligner.")
+        })?;
+        if n > 0 {
+            tracing::info!(
+                "DeepSeek vision tower: {n} tensors ({:.2} GiB) released on EP rank {ep_rank} \
+                 — this rank binds no DeepSeek vision encoder.",
+                bytes as f64 / (1024.0 * 1024.0 * 1024.0),
             );
         }
     }
@@ -963,6 +997,8 @@ pub fn build_model(
         self_speculative,
         num_drafts,
         vision_encoder,
+        vision_encoder_ds,
+        ds_image_params,
         ssm_cache_slots,
         ssm_checkpoint_interval,
     )?;
