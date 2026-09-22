@@ -63,10 +63,14 @@ prefill_attn_compressed_tc = "prefill_attn_compressed_tc"
 # spelled out because this file names every module it ships.
 #
 # NOTE: this file is symlinked from kernels/{b200,hopper}/deepseek-v4-flash/
-# nvfp4/KERNEL.toml, so these lines reach two other hardware trees. Inert
-# there: build.rs looks the [modules] map up per PRESENT source file, and
-# neither mirror carries these four stems. kernels/gb10/deepseek-v4.1-flash
-# sets kernel_source = "deepseek-v4-flash" and so compiles these sources too.
+# nvfp4/KERNEL.toml, so these lines reach two other hardware trees — and they
+# are NOT inert there: both mirrors carry every one of these stems as per-file
+# symlinks into this directory (required by avarok-kernels/tests/
+# inherited_targets.rs::every_model_nvfp4_dir_mirrors_gb10), so hopper (sm_90a)
+# and b200 (sm_100a) compile all of them. The sources use only sm_80-baseline
+# intrinsics and contain no preprocessor conditionals; none has been measured
+# on H100/H200 or B200. kernels/gb10/deepseek-v4.1-flash sets
+# kernel_source = "deepseek-v4-flash" and so compiles these sources too.
 
 # The ViT tower: a same-hardware symlink to
 # kernels/gb10/qwen3.6-35b-a3b/nvfp4/vision_encoder.cu — the tree's idiom for
