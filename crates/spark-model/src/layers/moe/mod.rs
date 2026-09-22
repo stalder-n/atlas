@@ -173,6 +173,17 @@ pub struct MoeLayer {
     /// here is the SSOT that this layer routes via the static hash table
     /// instead of the learned gate's top-K.
     tid2eid_dev: Option<DevicePtr>,
+    /// F32 `[num_experts]` image-token selection bias
+    /// (`ffn.gate.bias_vl`), DeepSeek-V4-Flash-Vision-Exp only. `Some` is the
+    /// SSOT that this layer routes image sentinels (`id >= vocab_size`)
+    /// through the `moe_router_vl` twins; `None` on every text checkpoint, so
+    /// they keep today's kernels byte-for-byte.
+    correction_bias_vl_dev: Option<DevicePtr>,
+    /// Both `KernelHandle(0)` unless `correction_bias_vl_dev` is `Some` — the
+    /// lookup is not even issued otherwise; see
+    /// `forward_prefill_router_vl::vl_router_kernels` for why.
+    moe_topk_sqrtsoftplus_batched_vl_k: KernelHandle,
+    moe_hash_route_batched_vl_k: KernelHandle,
     moe_expert_gate_up_shared_batch2_t_k: KernelHandle,
     moe_expert_silu_down_shared_batch2_t_k: KernelHandle,
     moe_expert_gate_up_shared_batch3_t_k: KernelHandle,
@@ -422,6 +433,7 @@ mod forward_prefill_fp8;
 mod forward_prefill_phase;
 mod forward_prefill_routed;
 mod forward_prefill_router;
+mod forward_prefill_router_vl;
 mod forward_token_major;
 mod helpers_a;
 mod helpers_b;

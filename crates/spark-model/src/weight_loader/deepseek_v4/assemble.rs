@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use anyhow::{Context, Result};
-use avarok_core::config::ModelConfig;
+use avarok_core::config::{ModelConfig, VisionFlavor};
 use spark_runtime::gpu::DevicePtr;
 use spark_runtime::gpu::GpuBackend;
 use spark_runtime::kv_cache::KvCacheDtype;
@@ -285,6 +285,26 @@ pub fn assemble_layer(
     // wrong blend weights → degraded output.)
     let correction_bias = load_correction_bias(store, &lp, config.num_experts, gpu)?;
 
+    // Vision-Exp per-modality selection bias (image tokens only). Absent on
+    // every text checkpoint (0731 and the whole support matrix) -> None ->
+    // today's router kernels, byte-for-byte.
+    let correction_bias_vl = load_gate_bias_f32(
+        store,
+        &format!("{lp}.ffn.gate.bias_vl"),
+        config.num_experts,
+        gpu,
+    )?;
+    if matches!(
+        config.vision.as_ref().map(|v| v.flavor),
+        Some(VisionFlavor::DeepseekV4)
+    ) {
+        anyhow::ensure!(
+            correction_bias_vl.is_some(),
+            "DeepSeek-V4 Vision-Exp layer {lp}: missing ffn.gate.bias_vl (F32 [{}])",
+            config.num_experts
+        );
+    }
+
     let moe_weights = MoeWeights {
         gate,
         shared_expert,
@@ -325,6 +345,7 @@ pub fn assemble_layer(
         config.num_experts,
         gate_nvfp4,
         tid2eid_dev,
+        correction_bias_vl.map(|dw| dw.weight),
         gpu,
         config,
     )?;
@@ -662,7 +683,6 @@ fn load_correction_bias(
     num_experts: usize,
     gpu: &dyn GpuBackend,
 ) -> Result<Option<DenseWeight>> {
-    use spark_runtime::weights::WeightDtype;
     let candidates = [
         format!("{layer_prefix}.ffn.gate.e_score_correction_bias"),
         format!("{layer_prefix}.ffn.gate.correction_bias"),
@@ -673,23 +693,45 @@ fn load_correction_bias(
         format!("{layer_prefix}.ffn.gate.bias"),
         format!("{layer_prefix}.mlp.gate.bias"),
     ];
-    let Some(bias_t) = candidates.iter().find_map(|k| store.get(k).ok()) else {
-        // V4-Flash ships no correction bias (noaux_tc with bias=0). Supply a
-        // zeroed F32 buffer so the MoE still routes via sigmoid scoring
-        // (`σ(l_i)/Σσ(l_j)` weights) rather than softmax — `MoeLayer::new`
-        // keys the sigmoid path off `correction_bias` being `Some`.
-        let bytes = num_experts * 4;
-        let ptr = gpu.alloc(bytes)?;
-        gpu.memset(ptr, 0, bytes)?;
-        return Ok(Some(DenseWeight { weight: ptr }));
+    for key in &candidates {
+        if let Some(dw) = load_gate_bias_f32(store, key, num_experts, gpu)? {
+            return Ok(Some(dw));
+        }
+    }
+    // V4-Flash ships no correction bias (noaux_tc with bias=0). Supply a
+    // zeroed F32 buffer so the MoE still routes via sigmoid scoring
+    // (`σ(l_i)/Σσ(l_j)` weights) rather than softmax — `MoeLayer::new`
+    // keys the sigmoid path off `correction_bias` being `Some`.
+    let bytes = num_experts * 4;
+    let ptr = gpu.alloc(bytes)?;
+    gpu.memset(ptr, 0, bytes)?;
+    Ok(Some(DenseWeight { weight: ptr }))
+}
+
+/// Load ONE gate-bias tensor as F32 `[num_experts]`, or `None` if the key is
+/// absent. A present tensor of the wrong length is a hard error — the routing
+/// kernels index it by expert id.
+///
+/// Shared by the `e_score_correction_bias` candidate search above and by the
+/// Vision-Exp `bias_vl` load: both feed a `const float*` selection-bias kernel
+/// argument, so both must widen BF16 (zero-extend mantissa) the same way.
+fn load_gate_bias_f32(
+    store: &WeightStore,
+    key: &str,
+    num_experts: usize,
+    gpu: &dyn GpuBackend,
+) -> Result<Option<DenseWeight>> {
+    use spark_runtime::weights::WeightDtype;
+    let Ok(bias_t) = store.get(key) else {
+        return Ok(None);
     };
     let n = bias_t.num_elements();
     anyhow::ensure!(
         n == num_experts,
-        "DeepSeek-V4 correction_bias length {n} != num_experts {num_experts}"
+        "DeepSeek-V4 correction_bias length {n} != num_experts {num_experts} (key {key})"
     );
-    // The moe_topk_sigmoid kernel consumes an F32 bias. F32 tensors pass
-    // through unchanged; BF16 must be widened (zero-extend mantissa).
+    // The routing kernels consume an F32 bias. F32 tensors pass through
+    // unchanged; BF16 must be widened (zero-extend mantissa).
     if bias_t.dtype == WeightDtype::BF16 {
         let mut bf16_buf = vec![0u8; n * 2];
         gpu.copy_d2h(bias_t.ptr, &mut bf16_buf)?;

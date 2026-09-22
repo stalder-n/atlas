@@ -126,6 +126,8 @@ mod moe_expert;
 mod moe_expert_more;
 #[path = "ops/moe_gate.rs"]
 mod moe_gate;
+#[path = "ops/moe_gate_vl.rs"]
+mod moe_gate_vl;
 #[path = "ops/moe_grouped_a.rs"]
 mod moe_grouped_a;
 #[path = "ops/moe_grouped_a2.rs"]
@@ -251,6 +253,7 @@ pub use moe_atomic_c4::*;
 pub use moe_expert::*;
 pub use moe_expert_more::*;
 pub use moe_gate::*;
+pub use moe_gate_vl::*;
 pub use moe_grouped_a::*;
 pub use moe_grouped_a2::*;
 #[allow(unused_imports)]

@@ -12,7 +12,7 @@ impl MoeLayer {
         gpu: &dyn GpuBackend,
         config: &avarok_core::config::ModelConfig,
     ) -> Result<Self> {
-        Self::new_with_hash(weights, num_experts, gate_nvfp4, None, gpu, config)
+        Self::new_with_hash(weights, num_experts, gate_nvfp4, None, None, gpu, config)
     }
 
     /// Like [`MoeLayer::new`] but with an optional DeepSeek-V4 hash-routing
@@ -24,6 +24,7 @@ impl MoeLayer {
         num_experts: usize,
         gate_nvfp4: Option<QuantizedWeight>,
         tid2eid_dev: Option<DevicePtr>,
+        correction_bias_vl: Option<DevicePtr>,
         gpu: &dyn GpuBackend,
         config: &avarok_core::config::ModelConfig,
     ) -> Result<Self> {
@@ -64,6 +65,9 @@ impl MoeLayer {
             weights.correction_bias.map(|dw| dw.weight);
 
         let _ = num_experts;
+        // Gated on purpose — see `vl_router_kernels` for the boot-audit reason.
+        let (topk_vl_k, hash_vl_k) =
+            super::forward_prefill_router_vl::vl_router_kernels(gpu, correction_bias_vl.is_some())?;
         let rms_norm_k = gpu.kernel("norm", "rms_norm")?;
         Ok(Self {
             weights,
@@ -350,6 +354,9 @@ impl MoeLayer {
                 "moe_hash_route_batched",
             ),
             tid2eid_dev,
+            correction_bias_vl_dev: correction_bias_vl,
+            moe_topk_sqrtsoftplus_batched_vl_k: topk_vl_k,
+            moe_hash_route_batched_vl_k: hash_vl_k,
             moe_expert_gate_up_shared_batch2_t_k: gpu.kernel(
                 "moe_shared_expert_fused_batch2_t",
                 "moe_expert_gate_up_shared_batch2_t",
