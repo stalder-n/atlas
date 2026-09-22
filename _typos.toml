@@ -159,6 +159,12 @@ byt = "byt"
 # `let pn = format!(...)`, `let (dts, shs, ..) = p.meta(&sn)?`). Not `on`/`ssh`.
 pn = "pn"
 shs = "shs"
+# `arange` — the torch/numpy API name (`torch.arange`, `np.arange`) quoted in
+# the DeepSeek ViT doc comments (vision_encoder_ds/{scratch,init}.rs) that map
+# the Rust position/rope tables back to the reference expressions. The checker
+# allows it in `.py` files via its Python dictionary but not in Rust prose.
+# Third-party identifier, not a typo of `arrange` — same rationale as `numer`.
+arange = "arange"
 
 [default.extend-identifiers]
 # `PNGs` — the plural of PNG, in the vision-fixture provisioning commentary.
