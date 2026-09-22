@@ -7,12 +7,20 @@
 // against the EXACT prompt the serving path renders instead of a
 // divergent third lowering.
 
+use axum::http::StatusCode;
 use axum::response::Response;
+use std::borrow::Cow;
 use std::sync::Arc;
+
+use avarok_core::config::VisionConfig;
+use spark_model::vision_deepseek::{
+    geometry::DsVisionGeometry, preprocess::preprocess_image_deepseek,
+};
 
 use crate::AppState;
 use crate::ir::ChatRequest;
 
+use super::super::compact::openai_error_response;
 use super::{msg_entry, template, thinking};
 
 // Opt-in per-request phase timing for the chat request path
@@ -138,6 +146,7 @@ pub(crate) fn prepare_chat_prompt(
         &req.tools,
         &messages,
         &image_pad_counts,
+        &image_pixels,
         enable_thinking,
         thinking_budget,
         reasoning_effort,
@@ -156,6 +165,8 @@ pub(crate) fn prepare_chat_prompt(
         );
     }
 
+    ds_image_admission(state, req, &image_pixels, prompt_tokens.len())?;
+
     Ok(PreparedChat {
         tools_active,
         cwd_hint,
@@ -164,6 +175,89 @@ pub(crate) fn prepare_chat_prompt(
         enable_thinking,
         thinking_budget,
     })
+}
+
+/// The two rejections a DeepSeek image prompt owes on top of the generic limit
+/// checks in `api/chat/mod.rs`.
+///
+/// No new cap is introduced and no literal is added. Whole-prompt prefill is already
+/// guaranteed by construction: `serve_phases::validate_v4_prefill_budget` fails the
+/// serve at boot unless the scheduler's `max_prefill_tokens` is at least
+/// `max_seq_len`, and `api/chat/mod.rs` refuses a prompt at or past `max_seq_len`.
+/// This restates that bound with a message that names the reason — an image prompt
+/// carries sentinel spans and cannot be chunked, so there is no partial-prefill
+/// fallback to degrade into.
+#[allow(clippy::result_large_err)]
+fn ds_image_admission(
+    state: &Arc<AppState>,
+    req: &ChatRequest,
+    image_pixels: &[spark_model::VisionItem],
+    prompt_len: usize,
+) -> Result<(), Response> {
+    if !state.tokenizer.ds_vision_armed() || image_pixels.is_empty() {
+        return Ok(());
+    }
+    if prompt_len > state.max_seq_len {
+        return Err(openai_error_response(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "the expanded image prompt is {prompt_len} tokens, over the {} this \
+                 server serves: a DeepSeek-V4 image prompt is prefilled whole (its \
+                 sentinel spans cannot be chunked), so send fewer or smaller images",
+                state.max_seq_len,
+            ),
+        ));
+    }
+    if req.top_logprobs.is_some() || req.return_token_ids {
+        return Err(openai_error_response(
+            StatusCode::BAD_REQUEST,
+            "prompt logprobs and token-id echo are not available for a prompt \
+             containing images: the image sentinel ids are at or above vocab_size, \
+             outside both the tokenizer's vocabulary and lm_head's range"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Preprocess ONE image for the DeepSeek-V4 tower: plan → resample → patchify,
+/// through `spark_model::vision_deepseek` (the SSOT the host goldens pin).
+///
+/// The returned `VisionItem` carries the ViT patch grid (`n_vit_h × n_vit_w`); the
+/// prompt-side grid is `geometry::n_llm` of those, computed in `template.rs`.
+#[allow(clippy::result_large_err)]
+pub(super) fn preprocess_ds_image(
+    uri: &str,
+    vcfg: &VisionConfig,
+) -> Result<spark_model::VisionItem, Response> {
+    let geometry = DsVisionGeometry::from_vision_config(vcfg).map_err(|e| {
+        openai_error_response(
+            StatusCode::BAD_REQUEST,
+            format!("DeepSeek-V4 vision config error: {e}"),
+        )
+    })?;
+    // SBIO: the DeepSeek preprocessor performs no I/O and accepts only a `data:` URI,
+    // while Atlas's IR hands a BARE base64 string over for any non-http `image_url`
+    // (`ImageData::from_uri`) — a remote URL has already been resolved to a data: URI
+    // by `resolve_media_uri`. Without this wrap every OpenAI client that sends raw
+    // base64 would get a 400 on a DS checkpoint. The empty-mime form is what the
+    // shared `decode_data_uri_bytes` accepts.
+    let uri = if uri.starts_with("data:") {
+        Cow::Borrowed(uri)
+    } else {
+        Cow::Owned(format!("data:;base64,{uri}"))
+    };
+    let patches = preprocess_image_deepseek(&uri, &geometry).map_err(|e| {
+        openai_error_response(
+            StatusCode::BAD_REQUEST,
+            format!("Image decode error: {e:#}"),
+        )
+    })?;
+    Ok(spark_model::VisionItem::image(
+        patches.pixels,
+        patches.plan.n_vit_h,
+        patches.plan.n_vit_w,
+    ))
 }
 
 /// The effort string handed to the template: the per-request value
@@ -297,3 +391,76 @@ mod tests {
 #[cfg(test)]
 #[path = "../../tokenizer/tests/native_tool_prompt.rs"]
 mod native_tool_prompt;
+
+// Sibling of `native_tool_prompt.rs` above: the U2.4 DeepSeek vision prompt
+// tests need `crate::ir`, `crate::api::chat` and `crate::anthropic`, none of
+// which the `--lib` target exposes, so they are declared from this (bin-only)
+// file rather than from `tokenizer/tests.rs`. They drive the DS lowering
+// through `test_lower_ds_messages` below (the `test_build_msg_entries`
+// precedent, DS flavour).
+#[cfg(test)]
+#[path = "../../tokenizer/tests/deepseek_v4_vision.rs"]
+mod deepseek_v4_vision;
+
+/// What the server's prompt front half produces for a DeepSeek-V4 request, as far as
+/// the encoder: the JSON message array, the ordered preprocessed images, and the
+/// Qwen pad counts (all zero on this path).
+#[cfg(test)]
+#[derive(Debug)] // `expect_err` on `Result<DsLowering, String>`
+pub(crate) struct DsLowering {
+    pub(crate) json_messages: Vec<serde_json::Value>,
+    pub(crate) image_pixels: Vec<spark_model::VisionItem>,
+    pub(crate) image_pad_counts: Vec<usize>,
+}
+
+/// Drive the REAL lowering — `build_msg_entries` + `build_json_messages_ds` — without
+/// an `AppState`, which needs a GPU-backed model host this test host cannot build.
+///
+/// Every argument that `prepare_chat_prompt` would read from `AppState` is pinned to
+/// what a DeepSeek vision serve installs: no Qwen area bound (the DS budget is
+/// `vision_max_n_token`), no remote fetching, no ffmpeg, levers off, and
+/// `preserve_developer_role = true` (the DS encoder renders `developer` itself).
+#[cfg(test)]
+pub(crate) fn test_lower_ds_messages(
+    vision_config: Option<&VisionConfig>,
+    input: &[crate::ir::Message],
+    tools_active: bool,
+) -> Result<DsLowering, String> {
+    let out = msg_entry::build_msg_entries(
+        vision_config,
+        None,
+        &super::remote_image::RemoteImagePolicy::default(),
+        &msg_entry::VideoDecode {
+            ffmpeg: &spark_model::video_decode_ffmpeg::FfmpegPolicy {
+                enabled: false,
+                ..Default::default()
+            },
+            fps: 2.0,
+        },
+        input,
+        tools_active,
+        &super::levers::ChatLevers::OFF,
+        true,
+    )
+    .map_err(rejection_text)?;
+    Ok(DsLowering {
+        json_messages: template::build_json_messages_ds(&out.messages),
+        image_pixels: out.image_pixels,
+        image_pad_counts: out.image_pad_counts,
+    })
+}
+
+/// `"<status>: <body>"` for a rejection `Response`, so a test can assert on the
+/// REASON rather than only on the status. The body is already fully buffered, so the
+/// one-shot current-thread runtime never actually waits.
+#[cfg(test)]
+fn rejection_text(response: Response) -> String {
+    let status = response.status();
+    let body = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("current-thread runtime")
+        .block_on(axum::body::to_bytes(response.into_body(), usize::MAX))
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_else(|e| format!("<unreadable body: {e}>"));
+    format!("{status}: {body}")
+}

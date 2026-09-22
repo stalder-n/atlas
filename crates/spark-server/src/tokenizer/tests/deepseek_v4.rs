@@ -26,7 +26,7 @@ fn render(input: &str, thinking: bool) -> String {
     } else {
         (fixture.as_array().expect("message array"), None)
     };
-    encode_messages(messages, tools, thinking, Some("low")).expect("official encoding")
+    encode_messages(messages, tools, thinking, Some("low"), false).expect("official encoding")
 }
 
 fn assert_exact(actual: &str, expected: &str) {
@@ -67,9 +67,9 @@ fn official_encoding_fixtures_are_byte_exact() {
 fn reasoning_effort_prefixes_are_distinct_and_generation_suffix_is_native() {
     let messages = serde_json::json!([{"role": "user", "content": "test"}]);
     let messages = messages.as_array().unwrap();
-    let low = encode_messages(messages, None, true, Some("low")).unwrap();
-    let high = encode_messages(messages, None, true, Some("high")).unwrap();
-    let max = encode_messages(messages, None, true, Some("max")).unwrap();
+    let low = encode_messages(messages, None, true, Some("low"), false).unwrap();
+    let high = encode_messages(messages, None, true, Some("high"), false).unwrap();
+    let max = encode_messages(messages, None, true, Some("max"), false).unwrap();
     assert!(low.ends_with("<｜Assistant｜><think>"));
     assert!(high.starts_with("<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"));
     assert!(max.starts_with("<｜begin▁of▁sentence｜>Reasoning Effort: Beyond maximum"));
@@ -79,7 +79,7 @@ fn reasoning_effort_prefixes_are_distinct_and_generation_suffix_is_native() {
 #[test]
 fn non_thinking_generation_is_preclosed() {
     let messages = serde_json::json!([{"role": "user", "content": "test"}]);
-    let rendered =
-        encode_messages(messages.as_array().unwrap(), None, false, None).expect("direct mode");
+    let rendered = encode_messages(messages.as_array().unwrap(), None, false, None, false)
+        .expect("direct mode");
     assert!(rendered.ends_with("<｜Assistant｜></think>"));
 }

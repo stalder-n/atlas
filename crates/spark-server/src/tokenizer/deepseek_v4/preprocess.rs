@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
@@ -196,4 +196,154 @@ pub(super) fn drop_thinking_messages(messages: &[Value]) -> Vec<Value> {
         }
     }
     out
+}
+
+// ─────────────────────────── vision: image → placeholder ───────────────────────────
+//
+// A port of the reference's `process_image_messages` / `_process_image_blocks` /
+// `_validate_no_image_sp_tokens` (`encoding/encoding_dsv4.py`, revision
+// 86f746b36186f0e567729a5c06a8c918caba82a9).
+//
+// ★ WHY HERE AND NOT IN `render::content_text`. The reference substitutes the
+// placeholder BEFORE the text blocks are joined, and joins them with `"\n\n"`;
+// `content_text` joins array parts with `""`. Substituting there would render
+// `<｜User｜><｜deepseek_image｜>describe` where the checkpoint was trained on
+// `<｜User｜><｜deepseek_image｜>\n\ndescribe`. Running the port at the head of
+// `encode_messages`, ahead of `merge_tool_messages`, reproduces the reference bytes
+// for free — the `"\n\n"`-join of the text blocks and the single joined `content`
+// string that `merge_tool_messages` re-wraps are the same bytes.
+//
+// ★ `_extract_image` IS DELIBERATELY NOT PORTED. Atlas never carries image bytes
+// inside the JSON message array: the binding is the ordered `Vec<VisionItem>` that
+// `msg_entry::collect_message_media` builds by walking `m.content` in client order,
+// while `template::build_json_messages_ds` emits one `{"type":"image"}` marker per
+// media item in that same order. The i-th placeholder in the rendered prompt is
+// therefore the i-th `VisionItem` by construction, and the count equality is enforced
+// downstream by `block::expand_placeholders`.
+//
+// ★ DIVERGENCE, INERT TODAY: Atlas's `merge_tool_messages` ignores a pre-existing
+// `content_blocks` on a user message and always re-wraps `content` into a single text
+// block, where the reference honours it. Because the pass below collapses
+// `content_blocks` back into a `"\n\n"`-joined `content` string, both produce identical
+// bytes for every shape Atlas can generate — but a caller that supplied
+// `content_blocks` directly would see the difference.
+
+/// The reference's `IMAGE_PLACEHOLDER`. Resolves to added-token id 129264 in the
+/// shipped tokenizer; the id itself is never hard-coded (see
+/// `ChatTokenizer::arm_ds_vision`).
+pub(crate) const IMAGE_PLACEHOLDER: &str = "<｜deepseek_image｜>";
+
+/// Replace every image content block with `{"type":"text","text": IMAGE_PLACEHOLDER}`,
+/// in place and in order, and rebuild each touched message's `content` string the way
+/// the reference does.
+///
+/// Only called when the serve is armed for a DeepSeek vision checkpoint, so a text
+/// checkpoint's bytes — and its tolerance for a string that merely contains the
+/// literal — are untouched.
+pub(super) fn process_image_messages(messages: &mut [Value]) -> Result<()> {
+    for message in messages.iter_mut() {
+        validate_no_image_sp_tokens(message)?;
+        let object = message
+            .as_object_mut()
+            .context("DeepSeek-V4 message must be an object")?;
+
+        // `content` as a list is the OpenAI spelling of `content_blocks`.
+        if object.get("content").is_some_and(Value::is_array)
+            && !object.contains_key("content_blocks")
+        {
+            let content = object.remove("content").expect("checked present above");
+            object.insert("content_blocks".into(), content);
+        }
+
+        let Some(blocks) = object
+            .get_mut("content_blocks")
+            .and_then(Value::as_array_mut)
+            .filter(|blocks| !blocks.is_empty())
+        else {
+            continue;
+        };
+        process_image_blocks(blocks)?;
+        let joined = join_text_blocks(blocks);
+        // The reference rebuilds `content` only when it is not already a string —
+        // i.e. exactly when it was moved into `content_blocks` above.
+        if !object.get("content").is_some_and(Value::is_string) {
+            object.insert("content".into(), Value::String(joined));
+        }
+    }
+    Ok(())
+}
+
+/// `"\n\n".join(block["text"] for top-level text blocks)` — the reference's list
+/// comprehension. Nested `tool_result` text never participates.
+fn join_text_blocks(blocks: &[Value]) -> String {
+    blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+        .map(|b| b.get("text").and_then(Value::as_str).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// One ordered traversal, recursing into `tool_result.content` exactly as the
+/// reference does (the tool-result image is the motivating case). Recursion depth is
+/// bounded by serde_json's own nesting limit on the request body.
+fn process_image_blocks(blocks: &mut [Value]) -> Result<()> {
+    for block in blocks.iter_mut() {
+        // `map(str::to_string)` rather than a borrow: the image arm replaces `*block`.
+        let kind = block
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        match kind.as_deref() {
+            Some("image" | "image_url") => {
+                *block = json!({"type": "text", "text": IMAGE_PLACEHOLDER});
+            }
+            Some("tool_result") => {
+                if let Some(nested) = block.get_mut("content").and_then(Value::as_array_mut) {
+                    process_image_blocks(nested)?;
+                }
+            }
+            Some("text") => {
+                let text = block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if text.contains(IMAGE_PLACEHOLDER) {
+                    let shown: String = text.chars().take(100).collect();
+                    bail!(
+                        "text block contains the image placeholder '{IMAGE_PLACEHOLDER}': \
+                         '{shown}'. Images must be sent as separate image content blocks."
+                    );
+                }
+            }
+            // Anything else — including `{"type":"video"}`, which `msg_entry` has
+            // already refused for this tower — passes through untouched.
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Port of `_validate_no_image_sp_tokens`: a client may not hand-write the
+/// placeholder. Its expansion produces sentinel ids at or above `vocab_size`, which
+/// `lm_head` cannot represent and the embedding splice would read out of range.
+fn validate_no_image_sp_tokens(message: &Value) -> Result<()> {
+    if message
+        .get("content")
+        .and_then(Value::as_str)
+        .is_some_and(|c| c.contains(IMAGE_PLACEHOLDER))
+    {
+        bail!(
+            "message content contains the image special token '{IMAGE_PLACEHOLDER}'. \
+             Images should be provided as image content blocks."
+        );
+    }
+    if message
+        .get("reasoning_content")
+        .and_then(Value::as_str)
+        .is_some_and(|c| c.contains(IMAGE_PLACEHOLDER))
+    {
+        bail!("reasoning_content contains the image special token '{IMAGE_PLACEHOLDER}'");
+    }
+    Ok(())
 }

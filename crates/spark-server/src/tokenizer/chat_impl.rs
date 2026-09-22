@@ -143,6 +143,9 @@ impl ChatTokenizer {
             chat_template,
             jinja_env,
             openai_jinja_env,
+            // Armed later, at serve time, by `arm_ds_vision` (serve_load.rs) —
+            // after every `config.vocab_size` cap has run.
+            ds_vision: None,
         })
     }
 
@@ -271,7 +274,11 @@ impl ChatTokenizer {
                 tools,
                 enable_thinking,
                 reasoning_effort,
+                self.ds_vision.is_some(),
             )?;
+            // UNEXPANDED on purpose: `api::chat::template` calls
+            // `expand_ds_image_blocks` explicitly, so the serving path and the
+            // token-count path share one wrapper and one grid source.
             return self.encode(&rendered);
         }
 
