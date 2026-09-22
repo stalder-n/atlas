@@ -31,6 +31,10 @@ pub(super) fn render_template(
     tools: &[crate::tool_parser::ToolDefinition],
     messages: &[MsgEntry],
     image_pad_counts: &[usize],
+    // The preprocessed media, in client order — the DeepSeek image path reads each
+    // item's ViT patch grid to build the `(n_llm_h, n_llm_w)` pairs its expansion
+    // needs. Unused by the Qwen path, which drives `image_pad_counts` instead.
+    image_pixels: &[spark_model::VisionItem],
     enable_thinking: bool,
     thinking_budget: Option<u32>,
     reasoning_effort: Option<crate::ir::ReasoningEffort>,
@@ -68,6 +72,12 @@ pub(super) fn render_template(
         .auto_compact_threshold
         .map(|t| t > 0.0)
         .unwrap_or(false);
+    // Auto-compact can DROP a message, which would desync the
+    // placeholder <-> image correspondence the DS expansion depends on (and turn a
+    // legitimate request into a count-mismatch 400). It is default-off; the skip is
+    // explicit so enabling it cannot silently break image prompts.
+    let ds_images = state.tokenizer.ds_vision_armed() && !image_pixels.is_empty();
+    let auto_compact_active = auto_compact_active && !ds_images;
     let json_messages = if auto_compact_active && json_messages.len() > 4 {
         let trial_tokens = state
             .tokenizer
@@ -107,8 +117,43 @@ pub(super) fn render_template(
         }
     };
 
-    // Expand image pads when needed.
-    let prompt_tokens = if image_pad_counts.iter().any(|&c| c > 1) {
+    // Expand the media placeholders. Two disjoint schemes: DeepSeek-V4 replaces ONE
+    // `<｜deepseek_image｜>` id per image with a full sentinel block, Qwen fans one
+    // `<|image_pad|>` out into a run of itself.
+    let prompt_tokens = if state.tokenizer.ds_vision_armed() {
+        // The two handles on one boot-time truth: `ds_vision_armed()` and
+        // `config.vision.flavor` are set together in `serve_load.rs`, and arming one
+        // without the other is the bug this names.
+        let vision = state
+            .vision_config
+            .as_ref()
+            .expect("the DS image path is armed only alongside config.vision");
+        let grids: Vec<(usize, usize)> = image_pixels
+            .iter()
+            .map(|item| {
+                // `spatial_merge_size` IS `vision_downsample_ratio` for this tower
+                // (parsers/deepseek_v4_vision.rs) — no literal 3.
+                (
+                    spark_model::vision_deepseek::geometry::n_llm(
+                        item.grid_h,
+                        vision.spatial_merge_size,
+                    ),
+                    spark_model::vision_deepseek::geometry::n_llm(
+                        item.grid_w,
+                        vision.spatial_merge_size,
+                    ),
+                )
+            })
+            .collect();
+        // ALWAYS called, even with zero images: see `expand_ds_image_blocks` — it is
+        // the guard that no bare placeholder id reaches the model.
+        state
+            .tokenizer
+            .expand_ds_image_blocks(prompt_tokens, &grids)
+            .map_err(|e| {
+                openai_error_response(StatusCode::BAD_REQUEST, format!("Image prompt error: {e}"))
+            })?
+    } else if image_pad_counts.iter().any(|&c| c > 1) {
         state
             .tokenizer
             .expand_vision_pads(prompt_tokens, image_pad_counts)
@@ -158,6 +203,13 @@ pub(super) fn render_template(
 /// at MsgEntry build time).
 pub(super) fn build_json_messages(messages: &[MsgEntry]) -> Vec<serde_json::Value> {
     build_json_messages_for(messages, false)
+}
+
+/// The DeepSeek-V4 lowering: `build_json_messages_for` with tool-call ids, which the
+/// checkpoint-native encoder needs to pair a tool result with its call. Named so the
+/// U2.4 vision tests can drive the EXACT server lowering rather than a copy of it.
+pub(crate) fn build_json_messages_ds(messages: &[MsgEntry]) -> Vec<serde_json::Value> {
+    build_json_messages_for(messages, true)
 }
 
 fn build_json_messages_for(

@@ -11,6 +11,10 @@ use anyhow::{Result, bail};
 mod preprocess;
 mod render;
 
+/// The checkpoint's image placeholder string, re-exported for the tokenizer's
+/// arming path (`chat_impl_ds_vision.rs`) — the port that owns it is private.
+pub(crate) use preprocess::IMAGE_PLACEHOLDER;
+
 pub(super) const BOS: &str = "<｜begin▁of▁sentence｜>";
 pub(super) const EOS: &str = "<｜end▁of▁sentence｜>";
 pub(super) const USER: &str = "<｜User｜>";
@@ -57,11 +61,18 @@ impl ReasoningEffort {
     }
 }
 
-pub(super) fn encode_messages(
+/// Render the checkpoint-native prompt string.
+///
+/// `ds_vision` arms the image path (a DeepSeek Vision-Exp checkpoint): image content
+/// blocks become `<｜deepseek_image｜>` placeholders and a user-supplied placeholder is
+/// refused. It is OFF for every text checkpoint, so the 0731 bytes — including its
+/// tolerance for a string that merely contains the literal — are unchanged.
+pub(crate) fn encode_messages(
     messages: &[serde_json::Value],
     tools: Option<&[serde_json::Value]>,
     enable_thinking: bool,
     reasoning_effort: Option<&str>,
+    ds_vision: bool,
 ) -> Result<String> {
     if messages.is_empty() {
         bail!("DeepSeek-V4 requires at least one message");
@@ -69,6 +80,12 @@ pub(super) fn encode_messages(
 
     let effort = ReasoningEffort::parse(reasoning_effort, enable_thinking)?;
     let mut messages = messages.to_vec();
+    // Ahead of everything else, exactly as the reference's `encode_messages` runs
+    // `process_image_messages` before `_encode_messages_text` — the `"\n\n"` join it
+    // performs is what `merge_tool_messages` then re-wraps unchanged.
+    if ds_vision {
+        preprocess::process_image_messages(&mut messages)?;
+    }
     preprocess::attach_top_level_tools(&mut messages, tools)?;
     let mut messages = preprocess::merge_tool_messages(&messages)?;
     preprocess::sort_tool_results_by_call_order(&mut messages);

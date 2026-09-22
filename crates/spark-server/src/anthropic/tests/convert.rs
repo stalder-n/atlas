@@ -213,3 +213,88 @@ fn unrecognised_block_types_deserialize_to_unknown_instead_of_failing() {
         .expect("unknown block type must parse");
     assert!(matches!(block, ContentBlock::Unknown));
 }
+
+#[test]
+fn dsml_both_api_adapters_preserve_tool_choice_policy() {
+    use crate::tool_parser::{DeepseekV4DsmlParser, ToolCallParser, ToolChoice};
+    let schema = serde_json::json!({"type":"object", "properties":{"q":{"type":"integer"}},"required":["q"]});
+    let parser = DeepseekV4DsmlParser;
+    assert!(parser.has_tool_grammar());
+    for (openai_choice, anthropic_choice, active, required) in [
+        (
+            serde_json::json!("auto"),
+            serde_json::json!({"type":"auto"}),
+            true,
+            false,
+        ),
+        (
+            serde_json::json!("required"),
+            serde_json::json!({"type":"any"}),
+            true,
+            true,
+        ),
+        (
+            serde_json::json!({"type":"function","function":{"name":"run"}}),
+            serde_json::json!({"type":"tool","name":"run"}),
+            true,
+            true,
+        ),
+        (
+            serde_json::json!("none"),
+            serde_json::json!({"type":"none"}),
+            false,
+            false,
+        ),
+    ] {
+        let openai: crate::openai::ChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model":"deepseek_v4", "max_tokens":64,
+                "messages":[{"role":"user","content":"call run"}],
+                "tools":[{"type":"function","function":{"name":"run","parameters":schema}}],
+                "tool_choice":openai_choice,
+            }))
+            .unwrap();
+        let anthropic: MessagesRequest = serde_json::from_value(serde_json::json!({
+            "model":"deepseek_v4", "max_tokens":64,
+            "messages":[{"role":"user","content":"call run"}],
+            "tools":[{"name":"run","input_schema":schema}],
+            "tool_choice":anthropic_choice,
+        }))
+        .unwrap();
+        for request in [
+            crate::ir::ChatRequest::from(openai),
+            crate::ir::ChatRequest::from(anthropic),
+        ] {
+            let tools_active = !request.tools.is_empty()
+                && !request
+                    .tool_choice
+                    .as_ref()
+                    .is_some_and(ToolChoice::is_none);
+            assert_eq!(tools_active, active);
+            let is_required = matches!(request.tool_choice.as_ref(), Some(ToolChoice::Mode(mode)) if mode == "required")
+                || matches!(
+                    request.tool_choice.as_ref(),
+                    Some(ToolChoice::Specific { .. })
+                );
+            assert_eq!(is_required, required);
+            if tools_active {
+                let mut engine = crate::grammar::GrammarEngine::new(
+                    &crate::grammar::tests::test_vocab(),
+                    &[130],
+                )
+                .unwrap();
+                let compiled = parser
+                    .compile_tool_grammar(&mut engine, &request.tools, !required)
+                    .unwrap()
+                    .unwrap();
+                let mut matcher = xgrammar::GrammarMatcher::new(&compiled, None, true, -1).unwrap();
+                assert!(matcher.accept_string("<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"run\">\n<｜DSML｜parameter name=\"q\" string=\"false\">7</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>", false));
+                assert!(matcher.is_terminated());
+            }
+            assert_eq!(request.tools[0].function.parameters.as_ref(), Some(&schema));
+            if let Some(ToolChoice::Specific { function }) = request.tool_choice {
+                assert_eq!(function.name, "run");
+            }
+        }
+    }
+}

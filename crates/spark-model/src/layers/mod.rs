@@ -3,6 +3,7 @@
 pub mod attn_v41;
 pub mod deepseek_v41_layer;
 pub mod deepseek_v41_ref;
+pub mod deepseek_v4_dspark;
 pub mod deepseek_v4_mtp;
 pub mod dense_ffn;
 pub mod dflash_head;
@@ -38,6 +39,7 @@ pub mod qsa;
 pub mod qwen3_attention;
 pub mod qwen3_ssm;
 pub mod vision_encoder;
+pub mod vision_encoder_ds;
 pub mod w4a16_gemv_tiers;
 
 /// Minimum K at which the deep-K `w4a16_gemm_t_k64` (K_STEP_T=64) beats the
@@ -75,6 +77,7 @@ pub(crate) fn w4a16_k64_min_k() -> u32 {
     })
 }
 
+pub use deepseek_v4_dspark::{DeepseekV4DsparkHead, DsparkProposerState};
 pub use deepseek_v4_mtp::{DeepseekV4MtpHead, DeepseekV4MtpProposerState};
 pub use dense_ffn::{DenseFfnLayer, DenseFfnWeights, FfnActivation};
 pub use dflash_head::{
@@ -88,6 +91,7 @@ pub use nemotron_moe::NemotronMoeLayer;
 pub use qwen3_attention::Qwen3AttentionLayer;
 pub use qwen3_ssm::Qwen3SsmLayer;
 pub use vision_encoder::{MergerLayer, ViTBlock, VisionEncoder};
+pub use vision_encoder_ds::{DeepseekVisionEncoder, DsImageParams, DsViTBlock};
 
 use crate::layer::ForwardContext;
 use anyhow::Result;

@@ -253,6 +253,7 @@ pub(super) fn run_standard_chunk_loop(
         model.ep_broadcast_cmd(p.chunk_offset as u32)?;
         model.ep_broadcast_cmd(p.prompt_tokens.len() as u32)?;
         model.ep_broadcast_tokens(&p.prompt_tokens)?;
+        model.ep_broadcast_vision_stage(&p.prompt_tokens)?;
         Ok(())
     })();
     if let Err(e) = ep_ok {

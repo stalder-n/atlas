@@ -7,6 +7,7 @@
 //! the allow-list.
 
 use super::*;
+use avarok_core::config::VisionFlavor;
 
 #[test]
 fn a_small_unbounded_image_only_moves_to_the_nearest_grid() {
@@ -77,6 +78,12 @@ fn ok_cfg() -> VisionConfig {
         // with an explicit bound, so the config-carried one is not the
         // subject here.
         max_pixels: None,
+        // Qwen tower: the four DS-only numerics are sentinels, not bounds.
+        flavor: VisionFlavor::Qwen,
+        rope_theta: 10000.0,
+        max_n_token: 0,
+        min_pixels: 0,
+        max_wh_ratio: 0,
     }
 }
 

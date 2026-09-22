@@ -336,6 +336,34 @@ pub struct TransformerModel {
     /// use band 0. This is the stride the scheduler passes to `commit_ctx`
     /// as `scratch_row`.
     pub(super) dflash_kgamma: usize,
+    // ── Native DSpark target capture (DeepSeek-V4 0731 / Vision-Exp) ──
+    //
+    // Deliberately a SEPARATE set of fields from the `dflash_*` five above,
+    // all `None`/empty/0 on every model that is not running the DSpark
+    // proposer, so every existing `dflash_hidden_save.is_some()` consumer
+    // (`verify_e.rs`, `dflash_accept_append`, `dflash_eagle_*`) is byte-for-byte
+    // unaffected. The two never coexist: DFlash is CLI-exclusive with
+    // `--speculative`.
+    /// `[dspark_kgamma * max_batch_size, n_targets * hidden]` BF16 capture
+    /// band. Row `i * dspark_kgamma + k` holds verify row `k` of sequence `i`;
+    /// within a row, capture layer `slot` occupies
+    /// `[slot * hidden, (slot+1) * hidden)`.
+    ///
+    /// 🔴 Unlike the DFlash capture this branches out of, it is written on
+    /// EVERY rank: `DeepseekV4DsparkHead::needs_comm()` is true, both ranks run
+    /// the propose, and a rank-0-only capture would have the worker propose
+    /// from stale input and all-reduce a partial of a different block.
+    pub(super) dspark_capture: Option<DevicePtr>,
+    /// `config.dspark_target_layer_ids`. Empty when DSpark is not active.
+    pub(super) dspark_capture_layers: Vec<usize>,
+    /// Row capacity of `dspark_capture`; writes past it are refused.
+    pub(super) dspark_capture_rows: usize,
+    /// Rows per per-sequence band in `dspark_capture` (= the verify width
+    /// `num_drafts + 1`).
+    pub(super) dspark_kgamma: usize,
+    /// `dspark_capture::dspark_hc_mean_capture`, resolved by the head and
+    /// installed with the band. `KernelHandle(0)` when DSpark is off.
+    pub(super) dspark_capture_k: spark_runtime::gpu::KernelHandle,
     /// Cached CUDA graphs for K=2 verification, **keyed by `seq.slot_idx`**.
     /// Same rationale as `decode_graph`: the captured graph has SSM
     /// h_state/conv_state pointers baked in as kernel arguments, so replay for
@@ -443,6 +471,17 @@ pub struct TransformerModel {
     pub(super) last_mtp_hidden_idx: std::sync::atomic::AtomicUsize,
     /// Optional vision encoder for VL models (Qwen3-VL).
     pub(super) vision_encoder: Option<crate::layers::VisionEncoder>,
+    /// DeepSeek-V4 ViT + aligner. RANK 0 ONLY — rank 1 receives the encoded
+    /// rows over the EP wire instead of loading a second tower.
+    pub(super) vision_encoder_ds: Option<crate::layers::DeepseekVisionEncoder>,
+    /// The aligner rows of the prefill in flight, on BOTH ranks. `None` until
+    /// the first image; allocated and grown from the row count, which both
+    /// ranks learn before the bulk broadcast (there is no derivable capacity
+    /// in the model, so a fixed one would be an invented literal).
+    pub(super) ds_vision_stage: Mutex<Option<super::ep_vision::DsVisionStage>>,
+    /// The four learned `image_{start,pad,newline,end}` vectors, on BOTH
+    /// ranks: the embedding splice runs wherever prefill runs.
+    pub(super) ds_image_params: Option<crate::layers::DsImageParams>,
     /// Number of patches encoded by the last prepare_vision_embed() call.
     /// 0 means no vision embeddings pending.
     pub(super) vision_embed_patches: Mutex<usize>,

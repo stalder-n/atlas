@@ -15,9 +15,16 @@
 //!
 //! When this test fails after adding a kernel param: update BOTH the launcher
 //! in spark-model AND the pin here, in the same commit.
+//!
+//! ★ THIS TEST IS `#[ignore]` AND VACUOUS ON A STUB BUILD. It reads the PTX
+//! baked into the binary, and `AVAROK_SKIP_BUILD=1` (every host without nvcc,
+//! including CI) bakes none; it runs on the Spark via
+//! `cargo test -- --ignored`. The V4 vision pins below are mirrored from the
+//! `.cu` SOURCES — host-runnable — in `deepseek_v4_kernel_audit.rs`
+//! (`v4_vision_kernel_arities_match_the_pins`). Change one, change the other.
 
-/// (module, kernel, expected .param count) for every kernel in the w4a16
-/// m128/tile launch family, per target that ships it. A target that does not
+/// (module, kernel, expected .param count) for every kernel in the launch
+/// families this tree pins, per target that ships it. A target that does not
 /// ship a (module, kernel) pair is skipped — presence is the kernel audit's
 /// job; ARITY of what is present is this test's job.
 const PINS: &[(&str, &str, usize)] = &[
@@ -39,6 +46,56 @@ const PINS: &[(&str, &str, usize)] = &[
     ("w4a16_v3", "w4a16_gemm_t_m128_v3", 8),
     // Load-time transpose (quantized.rs GPU path) — 4-arg launch.
     ("transpose_u8", "transpose_u8", 4),
+    // ── ViT tower ───────────────────────────────────────────────────────────
+    // These pins apply to EVERY target carrying a `vision_encoder` module, not
+    // just the DeepSeek one. The coupling is intentional: the tree has two
+    // real `vision_encoder.cu` files (qwen3.6-35b-a3b, which deepseek-v4-flash
+    // symlinks, and qwen3-vl-30b-a3b), every shared name has the same arity,
+    // and a Qwen-side parameter addition SHOULD fail here until every launcher
+    // is updated with it. qwen3-vl lacks four of the thirteen; a missing kernel
+    // is the audit's business, not this test's, so the table skips it.
+    ("vision_encoder", "vision_gemm_bias", 7),
+    ("vision_encoder", "vision_gemm_bias_nn", 7),
+    ("vision_encoder", "vision_add_bias", 4),
+    ("vision_encoder", "vision_layer_norm", 6),
+    ("vision_encoder", "vision_add_inplace", 3),
+    ("vision_encoder", "vision_gelu", 2),
+    ("vision_encoder", "vision_attention_rope", 7),
+    ("vision_encoder", "vit_rope_deinterleave", 9),
+    ("vision_encoder", "vit_softmax_rows", 4),
+    ("vision_encoder", "vit_scatter_head", 5),
+    ("vision_encoder", "vision_spatial_merge", 6),
+    ("vision_encoder", "vision_f32_to_bf16", 3),
+    ("vision_encoder", "vision_bf16_copy", 3),
+    // ── DeepSeek ViT/aligner element ops (deepseek-v4-flash only) ───────────
+    ("vision_deepseek", "ds_vision_unshuffle3", 7),
+    ("vision_deepseek", "ds_gelu_erf_inplace", 2),
+    ("vision_deepseek", "ds_swiglu_split", 4),
+    // ── V4 compressed prefill attention ─────────────────────────────────────
+    // The `_vis` twin drops the `sliding_window` scalar and gains the
+    // `win_lo`/`win_hi` per-query bound arrays, so it is 16 where its two
+    // siblings are 15. All three are pinned so they cannot drift apart
+    // silently — they share a launcher shape and an ATTEND body.
+    ("prefill_attn_compressed", "prefill_attn_compressed", 15),
+    (
+        "prefill_attn_compressed_tc",
+        "prefill_attn_compressed_tc",
+        15,
+    ),
+    (
+        "prefill_attn_compressed_vis",
+        "prefill_attn_compressed_vis",
+        16,
+    ),
+    // ── VL routers (deepseek-v4-flash only) ─────────────────────────────────
+    // `common/`'s 8 and 9 params, plus `(bias_vl, token_ids, vocab_size)` and
+    // `(bias_vl, vocab_size)` respectively.
+    ("moe_router_vl", "moe_topk_sqrtsoftplus_batched_vl", 11),
+    ("moe_router_vl", "moe_hash_route_batched_vl", 11),
+    // ── Native DSpark target capture (deepseek-v4-flash only) ───────────────
+    // (streams, dst, rows, hidden, hc_mult, src_row0, dst_row_stride_elems,
+    //  dst_slot_off_elems)
+    ("dspark_capture", "dspark_hc_mean_capture", 8),
 ];
 
 /// Targets whose copy of a kernel legitimately differs in arity from the
@@ -70,6 +127,8 @@ fn expected_arity(model: &str, module: &str, kernel: &str, family_pin: usize) ->
 /// Count `.param` declarations of a PTX `.entry` by name.
 fn ptx_param_count(ptx: &str, kernel: &str) -> Option<usize> {
     // `.visible .entry <name>(` then `.param ...` lines until `)`.
+    // The needle includes the paren, so `prefill_attn_compressed(` cannot
+    // match its `_tc`/`_vis` siblings.
     let needle = format!(".entry {kernel}(");
     let start = ptx.find(&needle)?;
     let body = &ptx[start..];

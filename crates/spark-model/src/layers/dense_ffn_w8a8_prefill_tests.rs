@@ -3,8 +3,7 @@
 //! Dispatch-selection contract for the W8A8 block-scaled dense-FFN prefill
 //! (#917/#928). These are CPU tests: they pin WHICH arm the native-FP8 prefill
 //! picks and the buffer-extent arithmetic the cuBLASLt arm depends on. The
-//! numerics themselves are the GPU microtest's job
-//! (`examples/native_fp8_ffn_w8a8_microtest.rs`).
+//! numerics themselves are the GPU microtest's job (`examples/native_fp8_ffn_w8a8_microtest.rs`).
 
 use super::{max_m_for, w8a8_prefill_selected};
 use crate::layer::{ForwardContext, MoeLoraRoute};
@@ -368,6 +367,7 @@ fn with_ctx<R>(h: &Harness, dispatch: GemmDispatch, f: impl FnOnce(&ForwardConte
         gdn_exact_replay: false,
         gdn_write_on_accept: false,
         token_ids: None,
+        image_window: None,
         host_token_ids: None,
         routed_lora_layers: None,
         midchunk_capture: None,

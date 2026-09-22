@@ -12,7 +12,9 @@ mod preflight;
 mod runtime;
 mod tokenizer_runtime;
 mod topology;
+mod v4_bringup;
 mod weights;
+pub(super) use v4_bringup::{validate_v4_bringup, validate_v4_prefill_budget};
 
 pub(super) use build::{
     build_high_speed_swap_config, build_model, build_prefix_cache, maybe_run_ep_worker,

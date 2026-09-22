@@ -41,7 +41,7 @@ mod op_dump;
 // compiles on Apple Silicon without dragging in `avarok_core::registry`.
 #[cfg(feature = "cuda")]
 pub mod innerq_driver;
-mod prefill;
+pub(crate) mod prefill;
 // The cuBLASLt W8A8 prefill arm that replaced `AVAROK_CUBLAS_GEMM=attn`'s
 // off-ledger BF16 weight dequant (#917 round 3 / #927).
 mod prefill_qkv_w8a8;

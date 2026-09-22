@@ -28,6 +28,7 @@ use crate::layer::{
     AttnMetadataDev, ForwardContext, GdnPrefillBuffers, LayerState, SsmLayerState, TransformerLayer,
 };
 use crate::layers::ops;
+use crate::layers::qwen3_attention::prefill::v4_visibility::ImageWindow;
 use crate::speculative::DraftProposer;
 use crate::traits::{ChunkedPrefillPageMetadata, Model, SequenceState};
 use crate::weight_map::{DenseWeight, MtpWeights, QuantizedWeight};
@@ -325,7 +326,15 @@ impl TransformerModel {
         // the full sequence from proc_start. If proc_start > 0, use paged attention.
         let needs_paged = proc_start > 0;
 
-        {
+        // DeepSeek-V4 image spans: per-query inclusive raw-key bounds for the
+        // processed range, `None` for every other model and every text prompt.
+        let image_bounds = ImageWindow::for_chunk(
+            &self.config,
+            &tokens[proc_start..proc_start + proc_count],
+            proc_start,
+        )?;
+
+        let image_window = {
             // SAFETY: Single-threaded scheduler access.
             let stg = unsafe { &mut *self.pinned_staging.get() };
             stg.positions.clear();
@@ -351,9 +360,23 @@ impl TransformerModel {
             if !needs_paged {
                 pack.put_prefix_at("slots", slot_offset, &stg.slots, proc_count)?;
             }
+            // Image-span bounds ride the same H2D, placed after the last
+            // field actually packed — note `slots` is packed only when
+            // `!needs_paged`, so the offset comes from `high_water()`, not
+            // from a fixed `slot_offset`. `put_at` refuses BEFORE writing.
+            let iw = match image_bounds.as_ref() {
+                Some(b) => {
+                    let lo_at = (pack.high_water() + 3) & !3;
+                    pack.put_at("win_lo", lo_at, &b.lo)?;
+                    pack.put_at("win_hi", lo_at + b.hi_offset(), &b.hi)?;
+                    Some(b.ptrs(meta_base.offset(lo_at)))
+                }
+                None => None,
+            };
             self.gpu
                 .copy_h2d_async_retained(pack.packed(), meta_base, stream)?;
-        }
+            iw
+        };
 
         if needs_paged {
             let current_blocks = seq.block_table.len();
@@ -463,6 +486,8 @@ impl TransformerModel {
             gdn_exact_replay: marconi_skip,
             gdn_write_on_accept: false,
             token_ids: None,
+            // DeepSeek-V4 image-span bounds for this range (staged above).
+            image_window,
             host_token_ids: None,
             // #30: request slot pairs (None unless routing to a non-active slot).
             routed_lora_layers: self.routed_slot_layers(seq.adapter_slot),

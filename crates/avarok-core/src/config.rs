@@ -868,7 +868,22 @@ pub struct QuantizationConfig {
     pub ignore_modules: Vec<String>,
 }
 
-/// Vision encoder configuration for Qwen3-VL models.
+/// Which vision-tower family a [`VisionConfig`] describes.
+///
+/// The two towers share the struct but almost nothing else: Qwen is
+/// LayerNorm + GELU + APE + deepstack with a 2×2 spatial merge; DeepSeek-V4
+/// is RMSNorm(1e-6) + SwiGLU + 2D RoPE with a 3×3 pixel-unshuffle aligner.
+/// Consumers dispatch on this, never on `depth`/`patch_size` heuristics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisionFlavor {
+    /// Qwen3-VL / Qwen3.5-VL / Qwen3.6 / Holo tower (nested `vision_config`).
+    Qwen,
+    /// DeepSeek-V4-Flash-Vision-Exp tower (flat `vision_*` keys).
+    DeepseekV4,
+}
+
+/// Vision encoder configuration (Qwen3-VL family and DeepSeek-V4-Flash-
+/// Vision-Exp; [`VisionConfig::flavor`] says which).
 #[derive(Debug, Clone)]
 pub struct VisionConfig {
     /// Number of ViT transformer blocks (depth=27).
@@ -917,6 +932,24 @@ pub struct VisionConfig {
     /// the encoder is constructed. `None` keeps the historical behaviour on
     /// both sides.
     pub max_pixels: Option<usize>,
+    /// Which tower this config describes. The Qwen parser sets
+    /// [`VisionFlavor::Qwen`]; the DeepSeek flat-key parser sets
+    /// [`VisionFlavor::DeepseekV4`].
+    pub flavor: VisionFlavor,
+    /// ViT 2D-RoPE base. Qwen's tower takes no RoPE base from config, so the
+    /// Qwen parser carries the family constant 10000.0; DeepSeek reads
+    /// `vision_rope_theta`.
+    pub rope_theta: f64,
+    /// DeepSeek `vision_max_n_token` (384): the image-token budget the resize
+    /// solver targets, and the `M` in the image-span attention bound. 0 on
+    /// Qwen, which has no equivalent — a sentinel, never "unbounded".
+    pub max_n_token: usize,
+    /// DeepSeek `vision_min_pixels` (147456): area floor for the `safe_resize`
+    /// loop. 0 on Qwen (sentinel).
+    pub min_pixels: usize,
+    /// DeepSeek `vision_max_wh_ratio` (8): at or above this width:height ratio
+    /// the preprocessor squashes instead of pad-contain. 0 on Qwen (sentinel).
+    pub max_wh_ratio: usize,
 }
 
 impl VisionConfig {

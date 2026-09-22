@@ -85,6 +85,11 @@ at conc=1; it trades against batch size and KV dtype (see §4).
 | **Qwen3.5-122B-A10B** | `Sehyo/Qwen3.5-122B-A10B-NVFP4` | 122B / 10B | NVFP4 | single (tight) **or** EP=2 | ~33 single / ~51 EP=2 | 256 experts; MTP K=2. Single-node needs the tight-KV recipe (§4) |
 | **MiniMax-M2.7** | `lukealonso/MiniMax-M2.7-NVFP4` | 229B / ~10B | NVFP4 | **EP=2** (2 nodes, TP=1) | — | 256-expert sigmoid MoE; BF16 KV bring-up, no MTP; registry-only |
 | **Qwen3.5-397B-A17B** | `nvidia/Qwen3.5-397B-A17B-NVFP4` | 397B / 17B | NVFP4 | **EP=4 (4 nodes) only** | — | ~200 GB weights; single/2-node OOM at preflight |
+| **DeepSeek-V4-Flash-Vision-Exp** | `deepseek-ai/DeepSeek-V4-Flash-Vision-Exp` · `s-zaizen/DeepSeek-V4-Flash-Vision-Exp-NVFP4` | 284B / 13B | FP8 + fp4 experts / NVFP4 experts | **EP=2** (2 nodes, TP=1) | — | **UNVALIDATED — BRING-UP, not in the serve matrix.** Image input (native ViT + aligner); 2048-token cap (prompt+output), batch 1, no speculation / prefix caching / chunked prefill / swap. Text-only sibling `nvidia/DeepSeek-V4-Flash-0731-NVFP4` shares the kernel target. See [bring-up](DEEPSEEK_V4_VISION_EXP_BRINGUP.md) · [0731](DEEPSEEK_V4_0731_LOCAL_BRINGUP.md) |
+
+**Rows marked "UNVALIDATED — BRING-UP"** are implementation handoffs, not support
+claims: they are **not** in the serve matrix, have no recipe in the registry, and
+may not boot. Their linked document says what has and has not been run.
 
 **"registry-only"** = the kernels are in the multi-model image and it serves fine,
 but there's no turnkey per-model `docker/gb10/<m>/` Dockerfile — run it against
@@ -278,7 +283,10 @@ is rare and OOM-prone for these models. The 397B needs **EP=4** (4 nodes).
 ## 8. What "verified" means (so you can trust an image)
 
 An Atlas image is only cut after it passes the **serve matrix** — every model×quant
-in §2 boots, stays coherent, and holds four quality signals. If you're evaluating
+in §2 boots, stays coherent, and holds four quality signals. Rows §2 marks
+**UNVALIDATED — BRING-UP** are excluded by definition: they are handoffs for
+work in progress, are not part of the matrix, and no image is gated on them.
+If you're evaluating
 Atlas or reproducing a claim, these are the signals and where they live:
 
 | Signal | What it proves | How it's checked |

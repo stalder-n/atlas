@@ -749,18 +749,26 @@ def run_long_context_tests(base_url, model):
 # never sent to a text-only model, so it can't false-FAIL a non-vision model.
 
 
-def _vision_sample_data_uri():
-    """Load the committed sample image as an OpenAI data URI. Override the
-    sample with AVAROK_VISION_TEST_IMAGE=<path>. Default:
-    tests/fixtures/mona_lisa.jpeg (alongside this script)."""
-    path = os.environ.get("AVAROK_VISION_TEST_IMAGE") or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "fixtures", "mona_lisa.jpeg"
-    )
+def _image_data_uri(path):
+    """Read an image file and return `(data_uri, path)`."""
     with open(path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode()
     ext = os.path.splitext(path)[1].lstrip(".").lower() or "jpeg"
     mime = "jpeg" if ext in ("jpg", "jpeg") else ext
     return f"data:image/{mime};base64,{b64}", path
+
+
+def _fixture_image(*parts):
+    """Path to a committed fixture image, relative to this script."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", *parts)
+
+
+def _vision_sample_data_uri():
+    """Load the committed sample image as an OpenAI data URI. Override the
+    sample with AVAROK_VISION_TEST_IMAGE=<path>. Default:
+    tests/fixtures/mona_lisa.jpeg (alongside this script)."""
+    path = os.environ.get("AVAROK_VISION_TEST_IMAGE") or _fixture_image("mona_lisa.jpeg")
+    return _image_data_uri(path)
 
 
 def run_vision_test(base_url, model):
@@ -820,6 +828,181 @@ def run_vision_test(base_url, model):
     return [{"name": "Image", "status": status, "preview": visible[:200], "elapsed": elapsed}]
 
 
+# ── DeepSeek-V4-Flash-Vision-Exp cases (opt-in: --vision-ds) ────────────────
+# Deliberately NOT folded into `--vision`. run_all_models.py passes `--vision`
+# for every TestSpec(vision=True) row (Qwen3-VL, Gemma-4 x2, Qwen3.5-27B,
+# Qwen3.6-35B); two images in one turn and an image inside a `role:"tool"`
+# result are DeepSeek-V4 bring-up probes and would false-FAIL those models.
+# Run this only against a DeepSeek-V4-Flash-Vision-Exp server.
+#
+# Each case pairs a structural check (no error, non-empty, no repetition loop)
+# with an objective token-accounting check, because a silently dropped image
+# still yields a plausible-looking answer. The floor below is the minimum an
+# image block can cost: `vision_min_pixels` (147456) forces every image to at
+# least a 10x10 aligner grid, which the N-layout expands to 114 sentinel tokens
+# plus 0-3 compression-pad tokens. 80 is slack under that, so the assertion
+# fires only when an image never became sentinels at all.
+DS_MIN_IMAGE_TOKEN_DELTA = 80
+
+
+def _prompt_tokens(result):
+    """usage.prompt_tokens, or None when the response carries no usage."""
+    try:
+        return int(result["usage"]["prompt_tokens"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _ds_structural_failure(result, visible):
+    """Return a FAIL status string when the response is unusable, else None."""
+    if "error" in result:
+        return f"FAIL (api error: {str(result['error'])[:120]})"
+    if visible.startswith("[ERROR]") or visible.startswith("[PARSE_ERROR]"):
+        return f"FAIL (bad response: {visible[:120]})"
+    if not visible.strip():
+        return "FAIL (empty answer)"
+    if _has_repetition_loop(visible):
+        return "FAIL (repetition loop)"
+    return None
+
+
+def _ds_token_delta_status(with_images, baseline, expected_images, what):
+    """Compare prompt_tokens of an image request against its text-only twin."""
+    got = _prompt_tokens(with_images)
+    base = _prompt_tokens(baseline)
+    if got is None or base is None:
+        return ("FAIL (no usage.prompt_tokens in the response — cannot prove the "
+                "image was expanded)"), None
+    delta = got - base
+    floor = DS_MIN_IMAGE_TOKEN_DELTA * expected_images
+    if delta < floor:
+        return (f"FAIL (prompt_tokens grew by {delta}, expected >= {floor} for "
+                f"{expected_images} image(s) in {what} — image expanded to sentinels? "
+                "check the server's DS placeholder resolution, and that "
+                "usage.prompt_tokens counts the EXPANDED stream)"), delta
+    return "PASS", delta
+
+
+def run_vision_ds_tests(base_url, model):
+    """DeepSeek-V4-Flash-Vision-Exp multi-image / tool-result-image cases.
+
+    Preconditions (the bring-up profile enforces them): `--max-batch-size 1`,
+    one client, `--max-seq-len` large enough for two image blocks plus the
+    text — the two-image case costs ~494 prompt tokens on the fixtures below.
+    """
+    print("\n" + "=" * 60)
+    print("VISION TESTS — DeepSeek-V4 (multi-image, tool-result image)")
+    print("=" * 60)
+
+    try:
+        # 1024x1024 -> 18x18 aligner grid (349 tokens at start_pos 0) and
+        # 512x384 -> 10x13 (145): two different grids, and two different
+        # `start_pos % 4` phases, so the position-dependent compression pad is
+        # exercised as well as the per-image grid plumbing.
+        big_uri, big_path = _image_data_uri(_fixture_image("mona_lisa.jpeg"))
+        small_uri, small_path = _image_data_uri(
+            _fixture_image("images", "03_landscape_512x384.png"))
+    except Exception as e:
+        print(f"  [FAIL] could not load fixture images: {e}")
+        return [{"name": "DS fixtures", "status": "FAIL (fixture images missing)",
+                 "preview": str(e)[:160]}]
+    print(f"  Images: {big_path}, {small_path}")
+
+    results = []
+
+    # ── Case 1: two images in one user turn ────────────────────────────────
+    question = "Describe each image in one short sentence, in order."
+    two = [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": big_uri}},
+        {"type": "image_url", "image_url": {"url": small_uri}},
+        {"type": "text", "text": question},
+    ]}]
+    one = [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": big_uri}},
+        {"type": "text", "text": question},
+    ]}]
+    two_result, elapsed = chat(base_url, model, two, max_tokens=192,
+                               temperature=0.0, timeout=300)
+    one_result, _ = chat(base_url, model, one, max_tokens=192,
+                         temperature=0.0, timeout=300)
+    visible = _strip_thinking(extract_text(two_result))
+    status = _ds_structural_failure(two_result, visible)
+    delta = None
+    if status is None:
+        status, delta = _ds_token_delta_status(two_result, one_result, 1,
+                                               "the second image of a two-image turn")
+    print(f"  [{status.split()[0]}] Two images in one turn "
+          f"(prompt_tokens delta={delta})")
+    print(f"    Preview: {visible[:200]}")
+    results.append({"name": "Multi-image", "status": status,
+                    "prompt_token_delta": delta, "preview": visible[:200],
+                    "elapsed": elapsed})
+
+    # ── Case 2: an image inside a tool result ──────────────────────────────
+    # The only check that catches an image dropped from a `role:"tool"` array
+    # content: the answer stays plausible either way, the token count does not.
+    def tool_conversation(attachment_parts):
+        return [
+            {"role": "user",
+             "content": "Fetch the reference attachment for order A-17 and tell me "
+                        "what it shows."},
+            {"role": "assistant", "content": None, "tool_calls": [{
+                "id": "call_a17", "type": "function",
+                "function": {"name": "get_attachment",
+                             "arguments": "{\"order_id\": \"A-17\"}"}}]},
+            {"role": "tool", "tool_call_id": "call_a17", "name": "get_attachment",
+             "content": attachment_parts},
+            {"role": "user",
+             "content": "What does the attachment show? Answer in one sentence."},
+        ]
+
+    caption = {"type": "text", "text": "attachment for order A-17"}
+    with_image = tool_conversation([
+        {"type": "image_url", "image_url": {"url": big_uri}}, caption])
+    without_image = tool_conversation([caption])
+    tool_result, tool_elapsed = chat(base_url, model, with_image, max_tokens=192,
+                                     temperature=0.0, timeout=300)
+    tool_base, _ = chat(base_url, model, without_image, max_tokens=192,
+                        temperature=0.0, timeout=300)
+    visible = _strip_thinking(extract_text(tool_result))
+    status = _ds_structural_failure(tool_result, visible)
+    delta = None
+    if status is None:
+        status, delta = _ds_token_delta_status(tool_result, tool_base, 1,
+                                               "a tool-result image")
+    print(f"  [{status.split()[0]}] Image inside a tool result "
+          f"(prompt_tokens delta={delta})")
+    print(f"    Preview: {visible[:200]}")
+    results.append({"name": "Tool-result image", "status": status,
+                    "prompt_token_delta": delta, "preview": visible[:200],
+                    "elapsed": tool_elapsed})
+
+    # ── Case 3: repeat determinism ─────────────────────────────────────────
+    # The compressor-state-leak probe: two sequential temperature-0 requests
+    # must produce byte-identical text. Sound only at --max-batch-size 1 with
+    # no other client, which the V4 bring-up profile enforces.
+    first, first_elapsed = chat(base_url, model, one, max_tokens=128,
+                                temperature=0.0, timeout=300)
+    second, _ = chat(base_url, model, one, max_tokens=128,
+                     temperature=0.0, timeout=300)
+    first_text = _strip_thinking(extract_text(first))
+    second_text = _strip_thinking(extract_text(second))
+    status = _ds_structural_failure(first, first_text)
+    if status is None:
+        status = _ds_structural_failure(second, second_text)
+    if status is None and first_text != second_text:
+        status = ("FAIL (two sequential temperature-0 image requests differ — "
+                  "compressor/vision state leaked between requests)")
+    if status is None:
+        status = "PASS"
+    print(f"  [{status.split()[0]}] Repeat determinism (same image twice)")
+    print(f"    Preview: {first_text[:200]}")
+    results.append({"name": "Repeat determinism", "status": status,
+                    "preview": first_text[:200], "elapsed": first_elapsed})
+
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description="Atlas Single-GPU Model Test Suite")
     parser.add_argument("--base-url", default="http://localhost:8888/v1", help="API base URL")
@@ -829,6 +1012,14 @@ def main():
         "--vision",
         action="store_true",
         help="Run the multimodal image test (opt-in; only for vision-capable models)",
+    )
+    parser.add_argument(
+        "--vision-ds",
+        action="store_true",
+        dest="vision_ds",
+        help="Run the DeepSeek-V4-Flash-Vision-Exp cases (multi-image, tool-result "
+             "image, repeat determinism). Opt-in; DS-specific, never sent to other "
+             "vision models",
     )
     parser.add_argument("--output", help="Save JSON results to file")
     args = parser.parse_args()
@@ -861,6 +1052,9 @@ def main():
     if args.vision:
         all_results["vision"] = run_vision_test(args.base_url, args.model)
 
+    if args.vision_ds:
+        all_results["vision_ds"] = run_vision_ds_tests(args.base_url, args.model)
+
     if not args.skip_longctx:
         all_results["long_context"] = run_long_context_tests(args.base_url, args.model)
 
@@ -882,6 +1076,10 @@ def main():
     if "vision" in all_results:
         v_pass = sum(1 for r in all_results["vision"] if "PASS" in r["status"])
         print(f"  Vision:       {v_pass}/{len(all_results['vision'])} PASS")
+
+    if "vision_ds" in all_results:
+        ds_pass = sum(1 for r in all_results["vision_ds"] if "PASS" in r["status"])
+        print(f"  Vision (DS):  {ds_pass}/{len(all_results['vision_ds'])} PASS")
 
     if "long_context" in all_results:
         lc_pass = sum(1 for r in all_results["long_context"] if "PASS" in r["status"])

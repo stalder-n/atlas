@@ -27,6 +27,11 @@ use crate::speculative::DraftProposer;
 use crate::traits::{ChunkedPrefillPageMetadata, Model, SequenceState};
 use crate::weight_map::{DenseWeight, MtpWeights, QuantizedWeight};
 
+/// The `(image_pad, video_pad)` pair returned for a model that has no
+/// placeholder token at all. No real token id is `u32::MAX`, so every
+/// `tok == image_pad` comparison downstream is false.
+pub(super) const NO_VISION_PAD: u32 = u32::MAX;
+
 impl TransformerModel {
     pub(super) fn comm_ref(&self) -> Option<&dyn spark_comm::CommBackend> {
         self.comm.as_deref()
@@ -44,6 +49,17 @@ impl TransformerModel {
     /// default when the checkpoint declares none.
     pub(super) fn vision_pad_ids(&self) -> (u32, u32) {
         let v = self.config.vision.as_ref();
+        // DeepSeek-V4 has NO placeholder pad token: image positions carry
+        // sentinel ids >= vocab_size, and its `image_pad_token_id` is 0 by
+        // contract (the parser's documented value, not a PCND default). The
+        // Qwen fallback below would therefore hand every DS serve Qwen's
+        // 151655/151656 and make it scan for ids from another family.
+        // `NO_VISION_PAD` keeps every `tok == image_pad` call site inert
+        // without changing this signature — `prefill_c`/`upload_meta` compare
+        // against it directly.
+        if v.is_some_and(|v| v.flavor == avarok_core::config::VisionFlavor::DeepseekV4) {
+            return (NO_VISION_PAD, NO_VISION_PAD);
+        }
         let image = v
             .map(|v| v.image_pad_token_id)
             .filter(|id| *id != 0)
@@ -68,6 +84,16 @@ impl TransformerModel {
     }
 
     pub(super) fn tokens_have_vision_pad(&self, tokens: &[u32]) -> bool {
+        // DeepSeek image spans are what disable prefix-cache lookup/insert and
+        // Marconi checkpointing for this prompt, for exactly the reason the
+        // doc above gives: the token stream is identical for two different
+        // images, so a warm hit would resurrect the first image's KV.
+        if self.ds_vision_active() {
+            return crate::vision_deepseek::visibility::has_image_span(
+                tokens,
+                self.config.vocab_size as u32,
+            );
+        }
         let (image, video) = self.vision_pad_ids();
         tokens.iter().any(|&t| t == image || t == video)
     }
@@ -489,6 +515,12 @@ impl TransformerModel {
                 let chunk_start = self.ep_broadcast_u32(0)? as usize;
                 let full_len = self.ep_broadcast_u32(0)? as usize;
                 let full_tokens = self.ep_broadcast_tokens(&vec![0u32; full_len])?;
+                // Mirror rank 0's `ep_broadcast_vision_stage`, from the SAME
+                // predicate over the SAME tokens. Skipping it when rank 0 sent
+                // desyncs the NCCL stream; receiving when it did not hangs.
+                if self.ds_tokens_have_image(&full_tokens) {
+                    self.ep_recv_vision_stage()?;
+                }
                 // Compute is_last from chunk bounds — must match rank 0's
                 // value so Marconi skip branches are identical (bug #33).
                 let is_last = chunk_start + chunk_len >= full_len;
@@ -535,6 +567,14 @@ impl TransformerModel {
                 // it actually verifies — but the drafter KV this writes must stay in lockstep,
                 // which it does because both ranks consume identical `(last_token, position)`
                 // and identical target hiddens (the target forward is already collective-correct).
+                //
+                // 🔴 This lane now also serves DeepSeek-V4 native DSpark, whose three stages are
+                // EP-SHARDED (`force_all_experts = false`) rather than replicated. Nothing here
+                // changes — `needs_comm()` already selects it — but the corollary lives in
+                // `impl_b3_dspark.rs`: the DSpark capture branch must NOT take the DFlash rank-0
+                // early return, or this worker proposes from a stale capture and the two ranks
+                // all-reduce partials of different inputs. `save_hidden_for_mtp` below is
+                // harmless for DSpark (it ignores `target_hidden` and reads the capture band).
                 let last_token = self.ep_broadcast_u32(0)?;
                 let position = self.ep_broadcast_u32(0)? as usize;
                 let num_drafts = self.ep_broadcast_u32(0)? as usize;

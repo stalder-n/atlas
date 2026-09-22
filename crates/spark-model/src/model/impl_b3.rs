@@ -99,6 +99,7 @@ impl TransformerModel {
             gdn_exact_replay: false,
             gdn_write_on_accept: false,
             token_ids: None,
+            image_window: None,
             host_token_ids: None,
             routed_lora_layers: None, // #30: MTP/draft decode never routes prefill.
             midchunk_capture: None,
@@ -235,6 +236,7 @@ impl TransformerModel {
                 }
             }
         }
+        self.dspark_note_committed_rows(prop_state.as_mut());
         let drafts = proposer.propose(
             token,
             self.mtp_hidden_save,
@@ -245,7 +247,10 @@ impl TransformerModel {
             stream,
             draft_embed_target,
             grammar_bitmask,
-            self.dflash_hidden_save,
+            // DFlash's EAGLE stack, or — on a native-DSpark serve, where
+            // `dflash_hidden_save` is `None` by construction — the DSpark
+            // capture band. Exactly one of the two is ever `Some`.
+            self.dflash_hidden_save.or(self.dspark_capture),
         )?;
         // Confidence clamp (AVAROK_MTP_DRAFT_CONF, staged off by default):
         // when the drafter's chain confidence is below tau, discard the
@@ -296,6 +301,15 @@ impl TransformerModel {
         proc_count: usize,
         stream: u64,
     ) -> Result<()> {
+        if self.dspark_capture.is_some() {
+            return self.try_dspark_prefill_capture_layer(
+                seq,
+                layer_idx,
+                chunk_start,
+                proc_count,
+                stream,
+            );
+        }
         if self.dflash_capture_layers.is_empty() {
             return Ok(());
         }
@@ -393,6 +407,14 @@ impl TransformerModel {
         token_idx: usize,
         stream: u64,
     ) -> Result<()> {
+        if self.dspark_capture.is_some() {
+            // Band law (`deepseek_v4_dspark/capture.rs`): band row i = target
+            // row i, so a verify that names its last row K-1 writes ALL of
+            // 0..=K-1 — the propose commits rows 0..=num_accepted, which the
+            // single-row form would leave unwritten. A decode names row 0.
+            let rows = crate::layers::deepseek_v4_dspark::rows_through(token_idx);
+            return self.try_dspark_capture_rows(layer_idx, 0, rows, 0, stream);
+        }
         let dst = match self.dflash_hidden_save {
             Some(p) => p,
             None => return Ok(()),
@@ -465,6 +487,9 @@ impl TransformerModel {
         dst_row0: usize,
         stream: u64,
     ) -> Result<()> {
+        if self.dspark_capture.is_some() {
+            return self.try_dspark_capture_rows(layer_idx, src_row0, k, dst_row0, stream);
+        }
         let dst = match self.dflash_hidden_save {
             Some(p) => p,
             None => return Ok(()),

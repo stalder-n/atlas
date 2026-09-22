@@ -127,6 +127,7 @@ pub(crate) fn load_model(
     // 1. Load model config (supports HF config.json and Mistral params.json)
     spark_runtime::progress::phase(2, "config");
     let (mut config, config_json) = serve_phases::load_model_config(&model_dir)?;
+    serve_phases::validate_v4_bringup(&args, &config)?;
 
     // CLI `--lm-head-dtype` override (replaces AVAROK_LMHEAD_BF16). Validate eagerly (PCND).
     // Sets both `lm_head_bf16_override` (skip/keep-quantized signal consumed by
@@ -167,6 +168,22 @@ pub(crate) fn load_model(
     // allocated for 6400 patches, and nothing connected them.
     let vision_max_pixels = resolve_vision_max_pixels(&args, &model_dir)?;
     if let Some(v) = config.vision.as_mut() {
+        // PCND: `--vision-max-pixels` is a Qwen AREA bound (patches after
+        // smart-resize) and has no meaning for the DeepSeek-V4 tower, whose budget
+        // is a TOKEN count (`vision_max_n_token`) solved for in
+        // `vision_deepseek::geometry`. Silently ignoring an explicit flag would let
+        // an operator believe they had capped image cost; refuse instead — which
+        // also leaves `max_pixels` None below, agreeing with AppState.
+        if v.flavor == avarok_core::config::VisionFlavor::DeepseekV4
+            && let Some(px) = vision_max_pixels
+        {
+            anyhow::bail!(
+                "--vision-max-pixels / AVAROK_VISION_MAX_PIXELS ({px}) is a Qwen area \
+                 bound and has no meaning for a DeepSeek-V4 vision tower; its budget \
+                 is vision_max_n_token = {} (config.json)",
+                v.max_n_token,
+            );
+        }
         v.max_pixels = vision_max_pixels;
     }
     match vision_max_pixels {
@@ -185,6 +202,18 @@ pub(crate) fn load_model(
                 "checkpoint processor config / AVAROK_VISION_MAX_PIXELS"
             }
         ),
+        // The DeepSeek-V4 tower has no area bound at all: the 1280px long-side clamp
+        // belongs to the Qwen smart-resize path its preprocessor never enters.
+        None if config
+            .vision
+            .as_ref()
+            .is_some_and(|v| v.flavor == avarok_core::config::VisionFlavor::DeepseekV4) =>
+        {
+            tracing::info!(
+                "Vision budget: DeepSeek-V4 token bound, vision_max_n_token = {}",
+                config.vision.as_ref().map_or(0, |v| v.max_n_token),
+            )
+        }
         None => tracing::info!(
             "Vision area bound: none declared — falling back to the 1280px long-side clamp"
         ),
@@ -586,6 +615,7 @@ pub(crate) fn load_model(
         max_batch_tokens,
         spec_tokens: _spec_tokens,
     } = serve_phases::resolve_prefill_budget(&args, ssm_prefill_chunk);
+    serve_phases::validate_v4_prefill_budget(&config, args.max_seq_len, prefill_budget)?;
     // 2026-08-21: the community-reported "prefix caching × DFlash wrong
     // outputs on multi-turn cache hits (SM12.x)" warning that used to print
     // here is RESOLVED and was never a cache or hardware defect. The carrier
@@ -837,7 +867,7 @@ pub(crate) fn load_model(
     // The --enable-thinking flag controls OPEN-ENDED vs CLOSED thinking.
     let caps = config.capabilities();
     let supports_thinking = caps.supports_thinking;
-    let tokenizer = ChatTokenizer::from_model_dir(
+    let mut tokenizer = ChatTokenizer::from_model_dir(
         &model_dir,
         eos_tokens[0],
         supports_thinking,
@@ -871,6 +901,25 @@ pub(crate) fn load_model(
         supports_thinking,
         &model_dir,
     );
+
+    // Arm the DeepSeek-V4 image prompt path. ORDERING IS LOAD-BEARING: the sentinel
+    // ids are `config.vocab_size + ty`, and `vocab_size` is capped TWICE before this
+    // point — by `cap_vocab_size_to_tokenizer` above and again inside
+    // `resolve_tokenizer_runtime` just now. Reading it any earlier would silently
+    // shift all five ids. The vision-encoder PTX-presence guard has already run, so a
+    // checkpoint reaching here has the `vision_encoder` module.
+    if config
+        .vision
+        .as_ref()
+        .is_some_and(|v| v.flavor == avarok_core::config::VisionFlavor::DeepseekV4)
+    {
+        let placeholder = tokenizer.arm_ds_vision(config.vocab_size as u32)?;
+        tracing::info!(
+            "DeepSeek-V4 image prompt path armed: <｜deepseek_image｜> = {placeholder}, \
+             sentinel base (vocab_size) = {}",
+            config.vocab_size,
+        );
+    }
 
     // 7. Create scheduler channel + spawn scheduler
     spark_runtime::progress::phase(9, "scheduler");
@@ -946,6 +995,33 @@ pub(crate) fn load_model(
             .dflash_gamma()
             .unwrap_or_else(|| args.resolved_dflash_gamma(None));
         g.saturating_sub(1).max(1)
+    } else if config.model_type == "deepseek_v4"
+        && config.dspark_block_size > 0
+        && scheduler_model.dflash_gamma().is_some()
+    {
+        // 🔴 The native DSpark block is trained at γ = 5, but `num_drafts ≤ 3`
+        // is the highest this serve path can actually reach.
+        // `scheduler/mtp_step.rs` routes `drafts.len() >= 4` to
+        // `step_verify_dflash`, whose model hooks (`dflash_accept_append`,
+        // `dflash_eagle_accept_append`, `dflash_eagle_kgamma_append`) hard-error
+        // with "not DFlash proposer state" on any state that is not a
+        // `DflashProposerState`. Asking for 4 or 5 would therefore fail at the
+        // first verify, not draft better.
+        //
+        // 3 is also the recipe default (vLLM's measured optimum for this
+        // checkpoint, `[behavior].default_num_drafts` in MODEL.toml), so the
+        // clamp costs nothing today. Raising it means teaching the DFlash
+        // verify ladder about DSpark — a follow-up unit, not a flag flip.
+        const DSPARK_MAX_DRAFTS: usize = 3;
+        let asked = args.resolved_num_drafts();
+        let capped = asked.min(DSPARK_MAX_DRAFTS);
+        if capped != asked {
+            tracing::warn!(
+                "DSpark: --num-drafts {asked} clamped to {capped}; the K=γ verify ladder is \
+                 DFlash-only, so drafts.len() >= 4 cannot be verified on this path"
+            );
+        }
+        capped
     } else {
         args.resolved_num_drafts()
     };

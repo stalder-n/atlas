@@ -251,6 +251,7 @@ fn ctx<'a>(
         gdn_exact_replay: false,
         gdn_write_on_accept: false,
         token_ids: None,
+        image_window: None,
         host_token_ids: None,
         routed_lora_layers: None,
         midchunk_capture: None,

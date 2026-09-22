@@ -24,18 +24,12 @@ pub(super) fn check_native_dspark_checkpoint(
         config.hidden_size.is_multiple_of(128) && config.moe_intermediate_size.is_multiple_of(128),
         "DeepSeek-V4 native quant contract requires hidden and MoE dimensions divisible by 128"
     );
-    ensure!(
-        config.dspark_block_size == 5,
-        "DeepSeek-V4 native DSpark contract requires K=5, found K={}",
-        config.dspark_block_size,
-    );
-
     check_target_quant_contract(store, config)?;
     let (local_start, local_end) = config.local_expert_range();
     let local_experts = local_end - local_start;
     tracing::info!(
         "DeepSeek-V4 target quant contract: EP rank {}/{} owns experts [{}..{}); \
-         routed={} MXFP4/E8M0 projections -> E8M0 MoE; \
+         routed={} projections validated per tensor group (NVFP4/E4M3 or MXFP4/E8M0); \
          shared={} FP8/E8M0 projections -> NVFP4 MoE; attention={} FP8/E8M0 projections -> BF16 dense",
         config.ep_rank,
         config.ep_world_size,
@@ -47,19 +41,41 @@ pub(super) fn check_native_dspark_checkpoint(
     );
 
     if !use_speculative {
+        tracing::info!("DeepSeek-V4 speculation is off; skipping independent DSpark draft tensors");
+        return Ok(());
+    }
+
+    // Two disjoint checkpoint families answer to `dspark_block_size > 0`:
+    //
+    //   * NATIVE DSpark (0731 / Vision-Exp) ships `mtp.{0,1,2}.*` with
+    //     `mtp.0.main_proj.weight` — the three-stage block drafter this
+    //     contract validates.
+    //   * LEGACY single-module MTP (`nvidia/DeepSeek-V4-Flash-NVFP4`) ships
+    //     `mtp.0.enorm` and no `main_proj`. It is a different architecture,
+    //     bound by `load_v4_mtp_module`, and must NOT be held to the DSpark
+    //     stage contract.
+    //
+    // `main_proj` is the cheapest discriminator; `load_v4_dspark_module` gates
+    // on the same tensor, so preflight and loader cannot disagree.
+    if !store.contains("mtp.0.main_proj.weight") {
         tracing::info!(
-            "DeepSeek-V4 checkpoint declares native DSpark K={}, but speculation is off; \
-             draft tensors remain independent of the qualified target path",
-            config.dspark_block_size,
+            "DeepSeek-V4: `--speculative` with no native DSpark stages \
+             (`mtp.0.main_proj.weight` absent) — the legacy single-module MTP path binds \
+             instead; skipping the DSpark stage contract"
         );
         return Ok(());
     }
 
     check_dspark_quant_contract(store, config)?;
     tracing::info!(
-        "Pre-flight: checkpoint-native DeepSeek-V4 DSpark K={} passed its three-stage \
-         tensor and quantization contract; enabling the native distributed proposer",
+        "DeepSeek-V4 native DSpark: 3 stages validated, block_size={}, noise_token={}, \
+         target_layers={:?}, markov_rank={} — proposer will load ~3 extra V4 bodies \
+         (routed experts EP-sharded across {} rank(s))",
         config.dspark_block_size,
+        config.dspark_noise_token_id,
+        config.dspark_target_layer_ids,
+        config.dspark_markov_rank,
+        config.ep_world_size.max(1),
     );
     Ok(())
 }
@@ -147,6 +163,7 @@ fn check_expert_group(store: &WeightStore, ffn: &str, config: &ModelConfig) -> R
         "invalid DeepSeek-V4 EP expert range [{local_start}..{local_end}) for {} experts",
         config.num_experts,
     );
+    let mut group_format = None;
     for expert in local_start..local_end {
         for projection in PROJECTIONS {
             let prefix = format!("{ffn}.experts.{expert}.{projection}");
@@ -157,12 +174,12 @@ fn check_expert_group(store: &WeightStore, ffn: &str, config: &ModelConfig) -> R
                 WeightDtype::UInt8,
                 &[out_dim, in_dim / 2],
             )?;
-            expect_tensor(
-                store,
-                &format!("{prefix}.scale"),
-                WeightDtype::FP8E8M0,
-                &[out_dim, in_dim / 32],
-            )?;
+            let format = crate::weight_map::v4_quant::resolve_packed_expert(store, &prefix)?;
+            if let Some(expected) = group_format {
+                ensure!(format == expected, "`{ffn}` mixes routed expert formats");
+            } else {
+                group_format = Some(format);
+            }
         }
     }
     Ok(())

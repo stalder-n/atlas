@@ -294,6 +294,7 @@ pub fn start_chunked_prefill(
             model.ep_broadcast_cmd(0)?; // chunk_start
             model.ep_broadcast_cmd(prompt_tokens.len() as u32)?; // full prompt length
             model.ep_broadcast_tokens(&prompt_tokens)?;
+            model.ep_broadcast_vision_stage(&prompt_tokens)?;
             Ok(())
         })() {
             let msg = format!("deferred prefill EP broadcast failed: {e:#}");
@@ -376,6 +377,7 @@ pub fn start_chunked_prefill(
         model.ep_broadcast_cmd(0)?; // chunk_start
         model.ep_broadcast_cmd(prompt_tokens.len() as u32)?; // full prompt length
         model.ep_broadcast_tokens(&prompt_tokens)?;
+        model.ep_broadcast_vision_stage(&prompt_tokens)?;
 
         // Co-dispatch: point this request's chunk-0 splice/MRoPE at its slice of
         // the shared packed buf_out. Single-chunk-fit is guaranteed upstream, so
@@ -760,5 +762,67 @@ pub fn start_chunked_prefill(
                 req_timeout_at,
             ),
         ))
+    }
+}
+
+#[cfg(test)]
+mod ep_vision_hook_tests {
+    //! ★ The EP vision exchange is symmetric or it hangs.
+    //!
+    //! Rank 1 decides whether to receive the DeepSeek aligner rows from the
+    //! tokens it was just sent, so EVERY site that broadcasts a `0xFFFFFFF0`
+    //! prefill command must follow its token broadcast with
+    //! `ep_broadcast_vision_stage`. A new site that forgets desyncs the NCCL
+    //! stream — a hang or a misread command word, with nothing in a type to
+    //! catch it. This scan is that catch.
+
+    use std::path::{Path, PathBuf};
+
+    fn scheduler_sources() -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src/scheduler")];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).expect("read scheduler dir") {
+                let path = e.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|x| x == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_prefill_command_site_broadcasts_the_vision_stage() {
+        // The call form the scan keys on, assembled so this file does not
+        // contain a literal occurrence of it and flag itself.
+        let needle = format!("model.{}(", "ep_broadcast_tokens");
+        let mut sites = 0usize;
+        for path in scheduler_sources() {
+            let src = std::fs::read_to_string(&path).expect("read source");
+            let lines: Vec<&str> = src.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                if !line.contains(&needle) {
+                    continue;
+                }
+                sites += 1;
+                assert!(
+                    lines
+                        .get(i + 1)
+                        .is_some_and(|n| n.contains("ep_broadcast_vision_stage(")),
+                    "{}:{}: this token broadcast is not followed by \
+                     `ep_broadcast_vision_stage`. Every 0xFFFFFFF0 prefill broadcast owes one, \
+                     or EP=2 hangs on a DeepSeek image prompt.",
+                    path.display(),
+                    i + 1
+                );
+            }
+        }
+        assert_eq!(
+            sites, 5,
+            "the scheduler has exactly five prefill broadcast sites today"
+        );
     }
 }

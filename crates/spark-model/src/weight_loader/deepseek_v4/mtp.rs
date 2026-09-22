@@ -71,6 +71,21 @@ pub fn load_v4_mtp_module(
     if config.num_mtp_modules == 0 {
         return Ok(None);
     }
+    // 🔴 A native-DSpark checkpoint also declares `num_mtp_modules` (3 on the
+    // 0731 / Vision-Exp family) and also ships `mtp.0.*` — but its stage 0 has
+    // `main_proj`/`main_norm` where this module wants `enorm`/`hnorm`/`e_proj`/
+    // `h_proj`. The two are disjoint architectures, so bail out here rather
+    // than let the `enorm` probe below print "MTP disabled" on a checkpoint
+    // that ships a perfectly good (different) drafter.
+    // `load_v4_dspark_module` gates on the SAME tensor, so exactly one of the
+    // two loaders ever binds.
+    if store.contains("mtp.0.main_proj.weight") {
+        tracing::info!(
+            "DeepSeek-V4: checkpoint ships the native 3-stage DSpark module \
+             (`mtp.0.main_proj.weight`); the legacy single-module MTP loader stands down"
+        );
+        return Ok(None);
+    }
     // The combiner's `enorm` is the cheapest MTP-only marker: present iff the
     // checkpoint actually ships MTP weights.
     if !store.contains("mtp.0.enorm.weight") {

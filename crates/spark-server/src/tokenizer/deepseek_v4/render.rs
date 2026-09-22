@@ -274,16 +274,28 @@ fn content_text(content: Option<&Value>) -> Result<String> {
                 part.get("text")
                     .and_then(Value::as_str)
                     .map(str::to_string)
-                    .or_else(|| {
-                        (part.get("image").is_some() || part.get("image_url").is_some())
-                            .then(|| "[Image]".to_string())
-                    })
+                    .or_else(|| marker_text(part))
                     .context("unexpected DeepSeek-V4 content item")
             })
             .collect::<Result<Vec<_>>>()
             .map(|parts| parts.join("")),
         Some(_) => bail!("unexpected DeepSeek-V4 content type"),
     }
+}
+
+/// The textual stand-in for an image part on a checkpoint with no vision tower.
+///
+/// `build_json_messages_for` emits a BARE `{"type":"image"}` marker, which the
+/// pre-existing `part["image"]`/`part["image_url"]` key probe could not see — so a
+/// DeepSeek text checkpoint answered any image with
+/// `400 "unexpected DeepSeek-V4 content item"`. On a vision serve this is unreachable:
+/// `preprocess::process_image_messages` has already turned every image block into a
+/// placeholder text block before rendering.
+fn marker_text(part: &Value) -> Option<String> {
+    let is_image = part.get("type").and_then(Value::as_str) == Some("image")
+        || part.get("image").is_some()
+        || part.get("image_url").is_some();
+    is_image.then(|| "[Image]".to_string())
 }
 
 fn role(message: &Value) -> Option<&str> {

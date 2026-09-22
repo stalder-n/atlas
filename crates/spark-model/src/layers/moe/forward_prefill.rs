@@ -236,25 +236,17 @@ impl MoeLayer {
         let weights_dev = scratch.offset(total_expanded as usize * 4);
         if let Some(tid2eid) = self.tid2eid_dev {
             // DeepSeek-V4 hash routing (hash_moe layer): static
-            // `tid2eid[token_id]` selection, sqrtsoftplus-weighted.
-            let token_ids = ctx.token_ids.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "DeepSeek-V4 hash-MoE layer requires ForwardContext.token_ids (prefill grouped)"
-                )
-            })?;
-            ops::moe_hash_route_batched(
-                ctx.gpu,
-                self.moe_hash_route_batched_k,
+            // `tid2eid[token_id]` selection, sqrtsoftplus-weighted — plus the
+            // learned `bias_vl` arm for image sentinels on Vision-Exp.
+            self.route_hash_prefill(
                 gate_logits,
                 tid2eid,
-                token_ids,
                 indices_dev,
                 weights_dev,
                 num_experts,
                 top_k,
-                ctx.config.norm_topk_prob,
-                ctx.config.routed_scaling_factor as f32,
                 n,
+                ctx,
                 stream,
             )?;
         } else if let Some(bias) = self.correction_bias_dev {
@@ -262,18 +254,15 @@ impl MoeLayer {
             // bias selects experts, weights gather pre-bias scores. Other
             // sigmoid+bias models (DeepSeek-V3 / MiniMax-M2) keep sigmoid.
             if ctx.config.scoring_func == "sqrtsoftplus" {
-                ops::moe_topk_sqrtsoftplus_batched(
-                    ctx.gpu,
-                    self.moe_topk_sqrtsoftplus_batched_k,
+                self.route_sqrtsoftplus_prefill(
                     gate_logits,
                     bias,
                     indices_dev,
                     weights_dev,
                     num_experts,
                     top_k,
-                    ctx.config.norm_topk_prob,
-                    ctx.config.routed_scaling_factor as f32,
                     n,
+                    ctx,
                     stream,
                 )?;
             } else if ctx.config.scoring_func == "softmax" {

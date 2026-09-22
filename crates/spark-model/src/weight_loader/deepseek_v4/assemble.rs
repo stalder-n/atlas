@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use anyhow::{Context, Result};
-use avarok_core::config::ModelConfig;
+use avarok_core::config::{ModelConfig, VisionFlavor};
 use spark_runtime::gpu::DevicePtr;
 use spark_runtime::gpu::GpuBackend;
 use spark_runtime::kv_cache::KvCacheDtype;
@@ -27,7 +27,7 @@ use crate::weight_map::{
 ///   - `.weight` is F8_E4M3 + `.scale` (F8_E8M0)   → FP8 block-scaled (nvidia shared experts) →
 ///     `quantized_from_fp8` (FP8→BF16→NVFP4 at load)
 ///   - `.weight` is U8/I8 + `.scale` (F8_E8M0)     → NVFP4 with E8M0 block scales (DeepSeek-V4
-///     ORIGINAL format, used by the MTP module) — not yet wired to a GEMM path
+///     ORIGINAL format, used by the MTP module) → native E8M0 MoE
 fn load_expert_proj(
     store: &WeightStore,
     prefix: &str,
@@ -38,8 +38,16 @@ fn load_expert_proj(
     if store.contains(&format!("{prefix}.weight_packed")) {
         return quantized_v2(store, prefix, gpu);
     }
-    if store.contains(&format!("{prefix}.weight_scale_2")) {
-        return quantized(store, prefix, gpu);
+    if store.get(&format!("{prefix}.weight"))?.dtype == WeightDtype::UInt8 {
+        use crate::weight_map::v4_quant::{PackedExpertFormat, resolve_packed_expert};
+        return match resolve_packed_expert(store, prefix)? {
+            PackedExpertFormat::Nvfp4 => quantized(store, prefix, gpu),
+            PackedExpertFormat::Mxfp4 => {
+                let qw = crate::weight_map::quantized_mxfp4_e8m0(store, prefix)?;
+                maybe_dump_expert0(prefix, &qw, gpu)?;
+                Ok(qw)
+            }
+        };
     }
     // No global scale → either FP8 block-scaled or E8M0-microscaled NVFP4;
     // distinguish by the `.weight` tensor dtype.
@@ -47,6 +55,7 @@ fn load_expert_proj(
         let w = store
             .get(&format!("{prefix}.weight"))
             .with_context(|| format!("{prefix}: no .weight tensor"))?;
+        anyhow::ensure!(w.shape.len() == 2, "{prefix}: expected a weight matrix");
         (w.shape[0], w.shape[1], w.dtype)
     };
     match dtype {
@@ -61,19 +70,6 @@ fn load_expert_proj(
             qctx.quantize_k,
             qctx.stream,
         ),
-        // NVFP4 4-bit (2 values/byte) + E8M0 `.scale`, no global — DeepSeek-V4's
-        // ORIGINAL native MXFP4 routed format. Land the bytes device-resident
-        // UNCHANGED (transcode-free): NO dequant, NO re-quantize. Tagged
-        // `Mxfp4E8m0` at the MoE-layer level (see `detect_routed_scale_kind`);
-        // the E8M0 GEMM variants (Phase-K) consume the E8M0 scales directly.
-        // WAS: `dequant_nvfp4_e8m0_to_bf16 → quantize_to_nvfp4` = TWO lossy
-        // 4-bit conversions at load (MXFP4→BF16→NVFP4) — the founding-scar path
-        // ARM-2 removes. `n`/`shape_k`/`qctx`/`gpu` unused on this arm now.
-        WeightDtype::UInt8 => {
-            let qw = crate::weight_map::quantized_mxfp4_e8m0(store, prefix)?;
-            maybe_dump_expert0(prefix, &qw, gpu)?;
-            Ok(qw)
-        }
         other => anyhow::bail!(
             "{prefix}: unsupported expert weight dtype {other:?} (expected FP8E4M3 or UInt8)"
         ),
@@ -113,33 +109,19 @@ fn maybe_dump_expert0(prefix: &str, qw: &QuantizedWeight, gpu: &dyn GpuBackend) 
 /// format dispatch: ONLY the `UInt8 .weight` + `.scale` + no-global/packed arm
 /// lands native MXFP4 (transcode-free, via `quantized_mxfp4_e8m0`); every other
 /// arm produces standard NVFP4. Probes the first locally-owned routed expert
-/// (EP-safe — each rank owns some); defaults to `Nvfp4` if none present.
+/// (EP-safe — each rank must own some).
 fn detect_routed_scale_kind(
     store: &WeightStore,
     layer_prefix: &str,
     config: &ModelConfig,
     force_all_experts: bool,
-) -> crate::weight_map::WeightQuantFormat {
-    use crate::weight_map::WeightQuantFormat;
-    use spark_runtime::weights::WeightDtype;
+) -> Result<crate::weight_map::WeightQuantFormat> {
     for e in 0..config.num_experts {
         if force_all_experts || config.is_local_expert(e) {
-            let wp = format!("{layer_prefix}.ffn.experts.{e}.w1");
-            let native = !store.contains(&format!("{wp}.weight_packed"))
-                && !store.contains(&format!("{wp}.weight_scale_2"))
-                && store.contains(&format!("{wp}.scale"))
-                && store
-                    .get(&format!("{wp}.weight"))
-                    .map(|w| w.dtype == WeightDtype::UInt8)
-                    .unwrap_or(false);
-            return if native {
-                WeightQuantFormat::Mxfp4E8m0
-            } else {
-                WeightQuantFormat::Nvfp4
-            };
+            return loaded_scale_kind(store, &format!("{layer_prefix}.ffn.experts.{e}.w1"));
         }
     }
-    WeightQuantFormat::Nvfp4
+    anyhow::bail!("{layer_prefix}: no locally owned routed experts")
 }
 
 /// Detect the SHARED expert quant format (ARM-2 Phase-K RIDER A1). Same native
@@ -150,24 +132,36 @@ fn detect_routed_scale_kind(
 fn detect_shared_scale_kind(
     store: &WeightStore,
     layer_prefix: &str,
-) -> crate::weight_map::WeightQuantFormat {
-    use crate::weight_map::WeightQuantFormat;
-    use spark_runtime::weights::WeightDtype;
-    let wp = format!("{layer_prefix}.ffn.shared_experts.w1");
-    let native = !store.contains(&format!("{wp}.weight_packed"))
-        && !store.contains(&format!("{wp}.weight_scale_2"))
-        && store.contains(&format!("{wp}.scale"))
-        && store
-            .get(&format!("{wp}.weight"))
-            .map(|w| w.dtype == WeightDtype::UInt8)
-            .unwrap_or(false);
-    if native {
-        WeightQuantFormat::Mxfp4E8m0
-    } else {
-        WeightQuantFormat::Nvfp4
-    }
+) -> Result<crate::weight_map::WeightQuantFormat> {
+    loaded_scale_kind(store, &format!("{layer_prefix}.ffn.shared_experts.w1"))
 }
 
+fn loaded_scale_kind(
+    store: &WeightStore,
+    prefix: &str,
+) -> Result<crate::weight_map::WeightQuantFormat> {
+    use crate::weight_map::WeightQuantFormat;
+    use crate::weight_map::v4_quant::{PackedExpertFormat, resolve_packed_expert};
+    if !store.contains(&format!("{prefix}.weight_packed"))
+        && store.get(&format!("{prefix}.weight"))?.dtype
+            == spark_runtime::weights::WeightDtype::UInt8
+    {
+        return Ok(match resolve_packed_expert(store, prefix)? {
+            PackedExpertFormat::Nvfp4 => WeightQuantFormat::Nvfp4,
+            PackedExpertFormat::Mxfp4 => WeightQuantFormat::Mxfp4E8m0,
+        });
+    }
+    Ok(WeightQuantFormat::Nvfp4)
+}
+
+/// [`assemble_layer_concrete`], boxed as a [`TransformerLayer`].
+///
+/// The two existing call sites (`load_layers.rs`, `mtp.rs`) want the trait
+/// object; the native-DSpark loader wants the CONCRETE type, because its three
+/// stages are driven field-by-field (`mla`, `hc`, `ffn`) rather than through
+/// `decode()`/`prefill()` — neither of which can express γ mutually-visible
+/// queries over a ring of MAIN-MODEL KV with no paged cache. See
+/// `layers/deepseek_v4_dspark/`.
 #[allow(clippy::too_many_arguments)]
 pub fn assemble_layer(
     layer_idx: usize,
@@ -203,6 +197,72 @@ pub fn assemble_layer(
     gpu: &dyn GpuBackend,
     layer_kv_dtypes: &[KvCacheDtype],
 ) -> Result<Box<dyn TransformerLayer>> {
+    Ok(Box::new(assemble_layer_concrete(
+        layer_idx,
+        layer_prefix,
+        force_all_experts,
+        input_norm,
+        post_attn_norm,
+        wq_a,
+        wq_a_nvfp4,
+        wq_b,
+        wq_b_nvfp4,
+        q_a_norm,
+        wkv_a,
+        wkv_a_nvfp4,
+        wkv_b,
+        kv_a_norm,
+        o_dense,
+        o_nvfp4,
+        w_uk_t,
+        w_uv,
+        wq_b_rope,
+        w_qk_absorbed,
+        w_uk_block_diag,
+        w_uv_block_diag,
+        yarn_inv_freq,
+        wo_a,
+        hc_head,
+        store,
+        config,
+        gpu,
+        layer_kv_dtypes,
+    )?))
+}
+
+/// Build one DeepSeek-V4 block body as the CONCRETE [`Qwen3AttentionLayer`].
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_layer_concrete(
+    layer_idx: usize,
+    layer_prefix: &str,
+    force_all_experts: bool,
+    input_norm: DenseWeight,
+    post_attn_norm: DenseWeight,
+    wq_a: DenseWeight,
+    wq_a_nvfp4: Option<QuantizedWeight>,
+    wq_b: DenseWeight,
+    wq_b_nvfp4: Option<QuantizedWeight>,
+    q_a_norm: DenseWeight,
+    wkv_a: DenseWeight,
+    wkv_a_nvfp4: Option<QuantizedWeight>,
+    wkv_b: DenseWeight,
+    kv_a_norm: DenseWeight,
+    o_dense: DenseWeight,
+    o_nvfp4: Option<QuantizedWeight>,
+    w_uk_t: DenseWeight,
+    w_uv: DenseWeight,
+    wq_b_rope: DenseWeight,
+    w_qk_absorbed: DenseWeight,
+    w_uk_block_diag: DenseWeight,
+    w_uv_block_diag: DenseWeight,
+    yarn_inv_freq: DevicePtr,
+    wo_a: DenseWeight,
+    hc_head: Option<HcHeadWeights>,
+    store: &WeightStore,
+    config: &ModelConfig,
+    gpu: &dyn GpuBackend,
+    layer_kv_dtypes: &[KvCacheDtype],
+) -> Result<Qwen3AttentionLayer> {
     // RedHatAI re-quant uses flattened naming: layers.N.* instead of model.layers.N.*
     // `layer_prefix` is the tensor-name prefix for this block: `layers.{idx}` for
     // main layers, or `mtp.0` for the MTP draft module (which reuses this exact
@@ -299,6 +359,26 @@ pub fn assemble_layer(
     // wrong blend weights → degraded output.)
     let correction_bias = load_correction_bias(store, &lp, config.num_experts, gpu)?;
 
+    // Vision-Exp per-modality selection bias (image tokens only). Absent on
+    // every text checkpoint (0731 and the whole support matrix) -> None ->
+    // today's router kernels, byte-for-byte.
+    let correction_bias_vl = load_gate_bias_f32(
+        store,
+        &format!("{lp}.ffn.gate.bias_vl"),
+        config.num_experts,
+        gpu,
+    )?;
+    if matches!(
+        config.vision.as_ref().map(|v| v.flavor),
+        Some(VisionFlavor::DeepseekV4)
+    ) {
+        anyhow::ensure!(
+            correction_bias_vl.is_some(),
+            "DeepSeek-V4 Vision-Exp layer {lp}: missing ffn.gate.bias_vl (F32 [{}])",
+            config.num_experts
+        );
+    }
+
     let moe_weights = MoeWeights {
         gate,
         shared_expert,
@@ -339,16 +419,17 @@ pub fn assemble_layer(
         config.num_experts,
         gate_nvfp4,
         tid2eid_dev,
+        correction_bias_vl.map(|dw| dw.weight),
         gpu,
         config,
     )?;
     // Tag routed-expert quant format so the Phase-K E8M0 MoE-GEMM variants
     // dispatch on native MXFP4 (transcode-free) vs the standard NVFP4 kernels.
-    moe.experts_scale_kind = detect_routed_scale_kind(store, p, config, force_all_experts);
+    moe.experts_scale_kind = detect_routed_scale_kind(store, p, config, force_all_experts)?;
     // Tag the SHARED expert format independently (RIDER A1): the native ckpt is
     // heterogeneous — routed E8M0-MXFP4, shared FP8→NVFP4. The dual-format decode
     // kernel asserts shared==Nvfp4; a different shared format fires the `expect`.
-    moe.shared_experts_scale_kind = detect_shared_scale_kind(store, p);
+    moe.shared_experts_scale_kind = detect_shared_scale_kind(store, p)?;
 
     // ── MLA weights ──
     // RedHatAI checkpoint: wkv_a may only contain kv_lora_rank rows (no rope).
@@ -570,7 +651,7 @@ pub fn assemble_layer(
         config.hc_mult
     );
 
-    Ok(Box::new(layer))
+    Ok(layer)
 }
 
 /// Load one HC site (`attn` or `ffn`) for a block as float32 device buffers.
@@ -676,7 +757,6 @@ fn load_correction_bias(
     num_experts: usize,
     gpu: &dyn GpuBackend,
 ) -> Result<Option<DenseWeight>> {
-    use spark_runtime::weights::WeightDtype;
     let candidates = [
         format!("{layer_prefix}.ffn.gate.e_score_correction_bias"),
         format!("{layer_prefix}.ffn.gate.correction_bias"),
@@ -687,23 +767,45 @@ fn load_correction_bias(
         format!("{layer_prefix}.ffn.gate.bias"),
         format!("{layer_prefix}.mlp.gate.bias"),
     ];
-    let Some(bias_t) = candidates.iter().find_map(|k| store.get(k).ok()) else {
-        // V4-Flash ships no correction bias (noaux_tc with bias=0). Supply a
-        // zeroed F32 buffer so the MoE still routes via sigmoid scoring
-        // (`σ(l_i)/Σσ(l_j)` weights) rather than softmax — `MoeLayer::new`
-        // keys the sigmoid path off `correction_bias` being `Some`.
-        let bytes = num_experts * 4;
-        let ptr = gpu.alloc(bytes)?;
-        gpu.memset(ptr, 0, bytes)?;
-        return Ok(Some(DenseWeight { weight: ptr }));
+    for key in &candidates {
+        if let Some(dw) = load_gate_bias_f32(store, key, num_experts, gpu)? {
+            return Ok(Some(dw));
+        }
+    }
+    // V4-Flash ships no correction bias (noaux_tc with bias=0). Supply a
+    // zeroed F32 buffer so the MoE still routes via sigmoid scoring
+    // (`σ(l_i)/Σσ(l_j)` weights) rather than softmax — `MoeLayer::new`
+    // keys the sigmoid path off `correction_bias` being `Some`.
+    let bytes = num_experts * 4;
+    let ptr = gpu.alloc(bytes)?;
+    gpu.memset(ptr, 0, bytes)?;
+    Ok(Some(DenseWeight { weight: ptr }))
+}
+
+/// Load ONE gate-bias tensor as F32 `[num_experts]`, or `None` if the key is
+/// absent. A present tensor of the wrong length is a hard error — the routing
+/// kernels index it by expert id.
+///
+/// Shared by the `e_score_correction_bias` candidate search above and by the
+/// Vision-Exp `bias_vl` load: both feed a `const float*` selection-bias kernel
+/// argument, so both must widen BF16 (zero-extend mantissa) the same way.
+fn load_gate_bias_f32(
+    store: &WeightStore,
+    key: &str,
+    num_experts: usize,
+    gpu: &dyn GpuBackend,
+) -> Result<Option<DenseWeight>> {
+    use spark_runtime::weights::WeightDtype;
+    let Ok(bias_t) = store.get(key) else {
+        return Ok(None);
     };
     let n = bias_t.num_elements();
     anyhow::ensure!(
         n == num_experts,
-        "DeepSeek-V4 correction_bias length {n} != num_experts {num_experts}"
+        "DeepSeek-V4 correction_bias length {n} != num_experts {num_experts} (key {key})"
     );
-    // The moe_topk_sigmoid kernel consumes an F32 bias. F32 tensors pass
-    // through unchanged; BF16 must be widened (zero-extend mantissa).
+    // The routing kernels consume an F32 bias. F32 tensors pass through
+    // unchanged; BF16 must be widened (zero-extend mantissa).
     if bias_t.dtype == WeightDtype::BF16 {
         let mut bf16_buf = vec![0u8; n * 2];
         gpu.copy_d2h(bias_t.ptr, &mut bf16_buf)?;

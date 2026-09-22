@@ -10,6 +10,7 @@
 
 mod compile_misc;
 mod compile_tools;
+mod deepseek_v4;
 mod engine;
 mod mask_cache;
 mod prewarm;

@@ -10,6 +10,11 @@ use anyhow::Result;
 use super::super::super::types::TransformerModel;
 use crate::layers::ops;
 
+// Declared from here rather than from the module list in `prefill_b.rs`,
+// which this unit does not own. `#[path]` keeps the file a plain sibling.
+#[path = "embed_chunk_ds.rs"]
+mod ds;
+
 impl TransformerModel {
     pub(super) fn prefill_b_embed_chunk(
         &self,
@@ -54,8 +59,25 @@ impl TransformerModel {
                 std::slice::from_raw_parts(chunk_tokens.as_ptr() as *const u8, chunk_len * 4)
             };
             let token_ids_dev = self.buffers.scratch(); // temporary, overwritten by MoE later
-            self.gpu
-                .copy_h2d_async(token_ids_bytes, token_ids_dev, stream)?;
+            // DeepSeek image sentinels are ids >= vocab_size and the embedding
+            // table has exactly `vocab_size` rows, so the GATHER must see them
+            // clamped or `batched_embed` reads past the table. Only this copy
+            // is clamped: `token_ids()` below must carry the RAW ids, because
+            // the VL MoE router detects an image token by `token_ids[t] >=
+            // vocab_size`. The clamped row is overwritten wholesale by the
+            // overlay in step 1b, so which row it gathers never matters.
+            let clamped: Option<Vec<u8>> = self.ds_vision_active().then(|| {
+                let v = self.config.vocab_size as u32;
+                chunk_tokens
+                    .iter()
+                    .flat_map(|&t| if t >= v { 0 } else { t }.to_ne_bytes())
+                    .collect()
+            });
+            self.gpu.copy_h2d_async(
+                clamped.as_deref().unwrap_or(token_ids_bytes),
+                token_ids_dev,
+                stream,
+            )?;
             // Also stage this chunk's token IDs into the STABLE token_ids buffer
             // (scratch is reused by MoE routing). DeepSeek-V4 hash-MoE reads
             // `tid2eid[token_id]` per token in this same chunk order.
@@ -170,6 +192,11 @@ impl TransformerModel {
                     }
                 }
             }
+            // DeepSeek image blocks. Inert for every other model, and the Qwen
+            // block above is inert here (`vision_encoder` is `None` on a
+            // DeepSeek build). Runs AFTER `scale_embeddings`, exactly where
+            // the Qwen splice runs, so spliced rows are never scaled.
+            ds::ds_overlay(self, tokens, chunk_start, chunk_len, hidden_dst, stream)?;
         }
 
         Ok(())

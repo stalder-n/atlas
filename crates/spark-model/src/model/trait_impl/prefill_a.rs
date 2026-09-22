@@ -30,6 +30,7 @@ use crate::layer::{
     AttnMetadataDev, ForwardContext, GdnPrefillBuffers, LayerState, SsmLayerState, TransformerLayer,
 };
 use crate::layers::ops;
+use crate::layers::qwen3_attention::prefill::v4_visibility::ImageWindow;
 use crate::speculative::DraftProposer;
 use crate::traits::{ChunkedPrefillPageMetadata, Model, SequenceState};
 use crate::weight_map::{DenseWeight, MtpWeights, QuantizedWeight};
@@ -295,6 +296,13 @@ impl TransformerModel {
             self.scale_embeddings(hidden, proc_count, stream)?;
         }
 
+        // DeepSeek-V4 image spans: per-query inclusive raw-key bounds for this
+        // chunk, or `None` for every other model and every text prompt (in
+        // which case the attention layers stay byte-identical). Computed on the
+        // host before staging so the pair rides the SAME single H2D as
+        // positions/slots/block_table/seq_len.
+        let image_bounds = ImageWindow::for_chunk(&self.config, proc_tokens, seq_len_start)?;
+
         // ── 3. Upload attention metadata via pinned staging (one H2D copy) ──
         let moe_scratch_bytes = proc_count * self.config.num_experts_per_tok * 4 * 2;
         let meta_offset = (moe_scratch_bytes + 7) & !7;
@@ -303,7 +311,7 @@ impl TransformerModel {
         let slot_offset = (proc_count * 4 + 7) & !7;
 
         // Lock staging, build metadata, pack, single H2D copy
-        let (block_table_dev, seq_len_dev) = {
+        let (block_table_dev, seq_len_dev, image_window) = {
             // SAFETY: Single-threaded scheduler access (see TransformerModel Send/Sync docs).
             let stg = unsafe { &mut *self.pinned_staging.get() };
             stg.positions.clear();
@@ -343,9 +351,27 @@ impl TransformerModel {
                 (DevicePtr::NULL, DevicePtr::NULL)
             };
 
+            // Image-span bounds land in the same metadata region, after the
+            // last field: `[0, moe_scratch_bytes)` is the MoE routing loop's
+            // and is never touched here, and everything from `meta_base` on
+            // stays live for the whole layer loop — the property
+            // `block_table`/`seq_len` already depend on. Alignment 4 (u32),
+            // matching the `bt_start`/`sl_start` rounding above. `put_at` is
+            // bounds-checked and refuses BEFORE writing, naming the field, so
+            // an over-long image prompt is a loud error, never an overrun.
+            let iw = match image_bounds.as_ref() {
+                Some(b) => {
+                    let lo_at = (pack.high_water() + 3) & !3;
+                    pack.put_at("win_lo", lo_at, &b.lo)?;
+                    pack.put_at("win_hi", lo_at + b.hi_offset(), &b.hi)?;
+                    Some(b.ptrs(meta_base.offset(lo_at)))
+                }
+                None => None,
+            };
+
             self.gpu
                 .copy_h2d_async_retained(pack.packed(), meta_base, stream)?;
-            devs
+            (devs.0, devs.1, iw)
         };
 
         // ── M2 request-scoped LoRA routing (prefill). Every one of the
@@ -400,6 +426,8 @@ impl TransformerModel {
             // Hash-MoE: token IDs for the `proc_count` tokens processed this
             // pass, in MoE-loop order (uploaded above to the stable buffer).
             token_ids: Some(self.buffers.token_ids()),
+            // DeepSeek-V4 image-span bounds for this chunk (staged above).
+            image_window,
             host_token_ids: None,
             // #30: request slot pairs (None unless routing to a non-active slot).
             routed_lora_layers: self.routed_slot_layers(seq.adapter_slot),

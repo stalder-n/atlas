@@ -78,7 +78,18 @@ impl Qwen3AttentionLayer {
 
         // ── 1. Q latent → norm → expand ──
         let q_latent = ctx.buffers.ssm_ba();
-        if use_tc {
+        if self.v4_fp8_projection(
+            ctx,
+            mla.wq_a_fp8.as_ref(),
+            normed,
+            q_latent,
+            n,
+            q_lora,
+            h,
+            stream,
+        )? {
+            // Native weight projection completed.
+        } else if use_tc {
             ops::dense_gemm_tc(
                 ctx.gpu,
                 self.dense_gemm_tc_k,
@@ -121,17 +132,28 @@ impl Qwen3AttentionLayer {
             .synchronize(stream)
             .map_err(|e| anyhow::anyhow!("V4 attn: q_a_norm sync failed: {e}"))?;
         let q_full = ctx.buffers.qkv_output();
-        ops::dense_gemm(
-            ctx.gpu,
-            self.dense_gemm_k,
+        if !self.v4_fp8_projection(
+            ctx,
+            mla.wq_b_fp8.as_ref(),
             q_latent,
-            &mla.wq_b,
             q_full,
             n,
             nq * hd_mla,
             q_lora,
             stream,
-        )?;
+        )? {
+            ops::dense_gemm(
+                ctx.gpu,
+                self.dense_gemm_k,
+                q_latent,
+                &mla.wq_b,
+                q_full,
+                n,
+                nq * hd_mla,
+                q_lora,
+                stream,
+            )?;
+        }
         ctx.gpu
             .synchronize(stream)
             .map_err(|e| anyhow::anyhow!("V4 attn: q_full gemm sync failed: {e}"))?;
@@ -183,20 +205,16 @@ impl Qwen3AttentionLayer {
         // bug exposed once the upstream norms were corrected. Use the scalar
         // dense_gemm path for wkv until the TC kernel is fixed. wq_a above is
         // unaffected (TC output is correct there).
-        #[allow(clippy::overly_complex_bool_expr)]
-        if false && use_tc {
-            ops::dense_gemm_tc(
-                ctx.gpu,
-                self.dense_gemm_tc_k,
-                normed,
-                &mla.wkv_a,
-                kv_latent, // Write to kv_latent for cache assembly
-                n,
-                kv_lora,
-                h,
-                stream,
-            )?;
-        } else {
+        if !self.v4_fp8_projection(
+            ctx,
+            mla.wkv_a_fp8.as_ref(),
+            normed,
+            kv_latent,
+            n,
+            kv_lora,
+            h,
+            stream,
+        )? {
             ops::dense_gemm(
                 ctx.gpu,
                 self.dense_gemm_k,
@@ -585,26 +603,76 @@ impl Qwen3AttentionLayer {
             // offset + accumulate — an inc-3 concern alongside decode-append.)
             self.v4_comp_pool_filled
                 .store(n_win, std::sync::atomic::Ordering::Relaxed);
-            KernelLaunch::new(ctx.gpu, self.prefill_attn_compressed_k)
-                .grid([nq, n.div_ceil(16), 1])
-                .block([128, 1, 1])
-                .arg_ptr(q_full)
-                .arg_ptr(k_out)
-                // MLA: V==K (rope in the tail), for both the raw and compressed KV.
-                .arg_ptr(k_out)
-                .arg_ptr(comp_k)
-                .arg_ptr(comp_k)
-                .arg_ptr(mla.attn_sink)
-                .arg_ptr(attn_out)
-                .arg_u32(n)
-                .arg_u32(nq)
-                .arg_u32(nkv)
-                .arg_u32(hd_mla)
-                .arg_u32(n_win)
-                .arg_u32(ratio)
-                .arg_u32(V4_WINDOW)
-                .arg_f32(1.0f32 / (hd_mla as f32).sqrt())
-                .launch(stream)?;
+            if let Some((win_lo, win_hi)) = ctx.image_window {
+                // An image span is bidirectional inside its block, which no
+                // `(sliding_window, causal)` kernel can express — not even the
+                // tensor-core one, which has no bounds parameter. The selector
+                // below is therefore not consulted: `_vis` or an error, never a
+                // silently-causal fallback.
+                //
+                // Argument order transcribed from
+                // kernels/gb10/deepseek-v4-flash/nvfp4/prefill_attn_compressed_vis.cu:
+                // the `sliding_window` u32 is GONE and the two bounds pointers
+                // sit after `ratio`. BR is 16 (scalar layout, 128 threads).
+                anyhow::ensure!(
+                    self.prefill_attn_compressed_vis_k.0 != 0,
+                    "V4 image-span prefill needs prefill_attn_compressed_vis, which did not \
+                     resolve; there is no causal fallback for a bidirectional image span."
+                );
+                KernelLaunch::new(ctx.gpu, self.prefill_attn_compressed_vis_k)
+                    .grid([nq, n.div_ceil(16), 1])
+                    .block([128, 1, 1])
+                    .arg_ptr(q_full)
+                    .arg_ptr(k_out)
+                    // MLA: V==K (rope in the tail), for both the raw and compressed KV.
+                    .arg_ptr(k_out)
+                    .arg_ptr(comp_k)
+                    .arg_ptr(comp_k)
+                    .arg_ptr(mla.attn_sink)
+                    .arg_ptr(attn_out)
+                    .arg_u32(n)
+                    .arg_u32(nq)
+                    .arg_u32(nkv)
+                    .arg_u32(hd_mla)
+                    .arg_u32(n_win)
+                    .arg_u32(ratio)
+                    .arg_ptr(win_lo)
+                    .arg_ptr(win_hi)
+                    .arg_f32(1.0f32 / (hd_mla as f32).sqrt())
+                    .launch(stream)?;
+            } else {
+                // Optional kernel exists only in the GB10 V4 target. Decide fallback
+                // before launch; an execution failure must propagate to the caller.
+                let (attention_kernel, query_rows) = super::v4_compressed_attention::select_kernel(
+                    ctx.levers.v4_compressed_attn_tc,
+                    self.prefill_attn_compressed_k,
+                    self.prefill_attn_compressed_tc_k,
+                    hd_mla,
+                    nq,
+                    nkv,
+                    ratio,
+                );
+                KernelLaunch::new(ctx.gpu, attention_kernel)
+                    .grid([nq, n.div_ceil(query_rows), 1])
+                    .block([128, 1, 1])
+                    .arg_ptr(q_full)
+                    .arg_ptr(k_out)
+                    // MLA: V==K (rope in the tail), for both the raw and compressed KV.
+                    .arg_ptr(k_out)
+                    .arg_ptr(comp_k)
+                    .arg_ptr(comp_k)
+                    .arg_ptr(mla.attn_sink)
+                    .arg_ptr(attn_out)
+                    .arg_u32(n)
+                    .arg_u32(nq)
+                    .arg_u32(nkv)
+                    .arg_u32(hd_mla)
+                    .arg_u32(n_win)
+                    .arg_u32(ratio)
+                    .arg_u32(V4_WINDOW)
+                    .arg_f32(1.0f32 / (hd_mla as f32).sqrt())
+                    .launch(stream)?;
+            }
             true
         } else {
             false
@@ -651,29 +719,74 @@ impl Qwen3AttentionLayer {
             }
         }
         if !did_csa {
-            // V4 full-attention (non-CSA) is always HDIM=512 → the 512 kernel.
-            // MLA: V==K (k_out carries the rope tail; v_out is the plain latent).
-            // Pass the per-head attention sink so the softmax denominator matches
-            // the decode path (the reference applies the sink on EVERY layer).
-            ops::prefill_attention_512_sink(
-                ctx.gpu,
-                self.prefill_attn_512_k,
-                q_full,
-                k_out,
-                k_out,
-                attn_out,
-                n,
-                1,
-                nq,
-                nkv,
-                hd_mla,
-                1.0f32 / (hd_mla as f32).sqrt(),
-                true,
-                V4_WINDOW,
-                mla.attn_sink,
-                stream,
-            )
-            .map_err(|e| anyhow::anyhow!("V4 attn: prefill_attention_512_sink failed: {e}"))?;
+            if let Some((win_lo, win_hi)) = ctx.image_window {
+                // Layers 0-1 (`compress_ratios[L] == 0`) and any compressor
+                // layer whose prompt is shorter than one window would take the
+                // plain windowed 512 kernel below — which applies the SAME raw
+                // window the reference makes bidirectional inside an image
+                // span. Leaving them there would make the span causal on
+                // exactly those layers, so they take `_vis` in its DEGENERATE
+                // no-compression form.
+                //
+                // ★ `n_comp = 0` with `ratio = 1`: the kernel computes
+                // `(q_row + 1) / ratio` unconditionally (0 would divide by
+                // zero) and then clamps to `n_comp`, so the compressed loop is
+                // empty and `Kc`/`Vc` are never dereferenced — they are still
+                // handed `k_out` rather than NULL. The launch then equals
+                // `prefill_attention_512_sink` plus the per-query bounds, on
+                // the same [S, H, D] layout, grid (nq, ceil(S/16), 1) and
+                // block 128.
+                anyhow::ensure!(
+                    self.prefill_attn_compressed_vis_k.0 != 0,
+                    "V4 image-span prefill (full-attention layer) needs \
+                     prefill_attn_compressed_vis, which did not resolve; there is no causal \
+                     fallback for a bidirectional image span."
+                );
+                KernelLaunch::new(ctx.gpu, self.prefill_attn_compressed_vis_k)
+                    .grid([nq, n.div_ceil(16), 1])
+                    .block([128, 1, 1])
+                    .arg_ptr(q_full)
+                    .arg_ptr(k_out)
+                    .arg_ptr(k_out)
+                    .arg_ptr(k_out)
+                    .arg_ptr(k_out)
+                    .arg_ptr(mla.attn_sink)
+                    .arg_ptr(attn_out)
+                    .arg_u32(n)
+                    .arg_u32(nq)
+                    .arg_u32(nkv)
+                    .arg_u32(hd_mla)
+                    .arg_u32(0)
+                    .arg_u32(1)
+                    .arg_ptr(win_lo)
+                    .arg_ptr(win_hi)
+                    .arg_f32(1.0f32 / (hd_mla as f32).sqrt())
+                    .launch(stream)?;
+            } else {
+                // V4 full-attention (non-CSA) is always HDIM=512 → the 512 kernel.
+                // MLA: V==K (k_out carries the rope tail; v_out is the plain latent).
+                // Pass the per-head attention sink so the softmax denominator matches
+                // the decode path (the reference applies the sink on EVERY layer).
+                ops::prefill_attention_512_sink(
+                    ctx.gpu,
+                    self.prefill_attn_512_k,
+                    q_full,
+                    k_out,
+                    k_out,
+                    attn_out,
+                    n,
+                    1,
+                    nq,
+                    nkv,
+                    hd_mla,
+                    1.0f32 / (hd_mla as f32).sqrt(),
+                    true,
+                    V4_WINDOW,
+                    mla.attn_sink,
+                    stream,
+                )
+                .map_err(|e| anyhow::anyhow!("V4 attn: prefill_attention_512_sink failed: {e}"))?;
+            }
         }
         ctx.gpu
             .synchronize(stream)
@@ -799,42 +912,65 @@ impl Qwen3AttentionLayer {
         let latent_dim = o_groups * o_lora;
         let o_latent = ctx.buffers.o_latent();
         let o_out = ctx.buffers.qkv_output();
-        for t in 0..n {
-            for g in 0..o_groups {
-                let in_g = attn_out.offset(((t * nq * hd_mla) + g * group_in) as usize * 2);
-                let w_g = crate::weight_map::DenseWeight {
-                    weight: mla
-                        .wo_a
-                        .weight
-                        .offset((g as usize) * (o_lora as usize) * (group_in as usize) * 2),
-                };
-                let out_g = o_latent.offset(((t * latent_dim) + g * o_lora) as usize * 2);
-                ops::dense_gemv(
-                    ctx.gpu,
-                    self.dense_gemv_k,
-                    in_g,
-                    &w_g,
-                    out_g,
-                    o_lora,
-                    group_in,
-                    stream,
-                )?;
+        if !self.v4_fp8_grouped_projection(
+            ctx,
+            mla.wo_a_fp8.as_ref(),
+            attn_out,
+            o_latent,
+            n,
+            o_groups,
+            o_lora,
+            group_in,
+            stream,
+        )? {
+            for t in 0..n {
+                for g in 0..o_groups {
+                    let in_g = attn_out.offset(((t * nq * hd_mla) + g * group_in) as usize * 2);
+                    let w_g = crate::weight_map::DenseWeight {
+                        weight: mla
+                            .wo_a
+                            .weight
+                            .offset((g as usize) * (o_lora as usize) * (group_in as usize) * 2),
+                    };
+                    let out_g = o_latent.offset(((t * latent_dim) + g * o_lora) as usize * 2);
+                    ops::dense_gemv(
+                        ctx.gpu,
+                        self.dense_gemv_k,
+                        in_g,
+                        &w_g,
+                        out_g,
+                        o_lora,
+                        group_in,
+                        stream,
+                    )?;
+                }
             }
         }
         ctx.gpu
             .synchronize(stream)
             .map_err(|e| anyhow::anyhow!("V4 attn: wo_a grouped gemv sync failed: {e}"))?;
-        ops::dense_gemm(
-            ctx.gpu,
-            self.dense_gemm_k,
+        if !self.v4_fp8_projection(
+            ctx,
+            mla.wo_b_fp8.as_ref(),
             o_latent,
-            &mla.wo_b,
             o_out,
             n,
             h,
             latent_dim,
             stream,
-        )?;
+        )? {
+            ops::dense_gemm(
+                ctx.gpu,
+                self.dense_gemm_k,
+                o_latent,
+                &mla.wo_b,
+                o_out,
+                n,
+                h,
+                latent_dim,
+                stream,
+            )?;
+        }
         ctx.gpu
             .synchronize(stream)
             .map_err(|e| anyhow::anyhow!("V4 attn: wo_b gemm sync failed: {e}"))?;

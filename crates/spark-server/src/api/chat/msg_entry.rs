@@ -11,7 +11,7 @@
 use axum::http::StatusCode;
 use axum::response::Response;
 
-use avarok_core::config::VisionConfig;
+use avarok_core::config::{VisionConfig, VisionFlavor};
 
 use crate::ir::{ContentPart, ImageData, MediaKind, Message, Role};
 
@@ -404,6 +404,26 @@ pub(super) fn build_msg_entries(
             ));
         };
         for (idx, input) in media.iter().enumerate() {
+            // DeepSeek-V4's tower has its own geometry (vision_max_n_token, not a
+            // Qwen area bound) and its own prompt layout, so it never reaches the
+            // smart-resize preprocessor below. The heavy lifting is in
+            // `prepare::preprocess_ds_image`.
+            if vcfg.flavor == VisionFlavor::DeepseekV4 {
+                if input.kind == MediaKind::Video {
+                    return Err(openai_error_response(
+                        StatusCode::BAD_REQUEST,
+                        "this model does not accept video input (the DeepSeek-V4 vision \
+                         tower has temporal_patch_size 1 and no temporal axis)"
+                            .to_string(),
+                    ));
+                }
+                // `VisionItem::pad_count` is a Qwen spatial-merge count, NOT the DS
+                // block length: the DS prompt is expanded by
+                // `block::expand_placeholders`, never by `expand_vision_pads`.
+                image_pad_counts[idx] = 0;
+                image_pixels.push(super::prepare::preprocess_ds_image(&input.uri, vcfg)?);
+                continue;
+            }
             let item = match input.kind {
                 MediaKind::Image => {
                     match spark_model::vision_preprocess::preprocess_image_with_max_pixels(

@@ -53,6 +53,8 @@ pub(super) fn from_values(
     }
 
     ModelLevers {
+        v4_fp8_prefill: opt_in(value("ATLAS_V4_FP8_PREFILL").as_deref()),
+        v4_compressed_attn_tc: opt_in(value("ATLAS_V4_COMPRESSED_ATTN_TC").as_deref()),
         max_decode_seqs: 1,
         shadow_topk,
         kv_poison: opt_in(value("AVAROK_KV_POISON").as_deref()),

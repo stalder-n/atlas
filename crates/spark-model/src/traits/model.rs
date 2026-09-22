@@ -1082,6 +1082,19 @@ pub trait Model: Send + Sync {
         Ok(Vec::new()) // no-op for non-EP models
     }
 
+    /// Rank 0: broadcast the staged DeepSeek aligner rows for `tokens`,
+    /// immediately after the `ep_broadcast_tokens` of a `0xFFFFFFF0` prefill
+    /// command. Default: no-op.
+    ///
+    /// ★ EVERY site that broadcasts a prefill command must call this. The
+    /// worker decides whether to receive from the tokens it just got, so an
+    /// unhooked site desyncs the NCCL stream and hangs rank 1. `tokens` is the
+    /// array that was broadcast, so both ranks evaluate the SAME predicate
+    /// rather than relying on hidden per-call state.
+    fn ep_broadcast_vision_stage(&self, _tokens: &[u32]) -> Result<()> {
+        Ok(()) // no-op for non-EP and non-DeepSeek-vision models
+    }
+
     /// Trim the MTP proposer's KV cache after verification.
     ///
     /// Called on rejection to discard the rejected draft's MTP KV entry.

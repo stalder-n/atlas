@@ -462,6 +462,7 @@ impl TransformerModel {
                 gdn_exact_replay: false,
                 gdn_write_on_accept: false,
                 token_ids: None,
+                image_window: None,
                 host_token_ids: None,
                 // #30: forward the parent's routing (None on this decode-profiling
                 // path, but never silently drop it if a prefill ever re-wraps).
@@ -666,6 +667,7 @@ impl TransformerModel {
             gdn_exact_replay: false,
             gdn_write_on_accept: false,
             token_ids: None,
+            image_window: None,
             host_token_ids: None,
             routed_lora_layers: None, // #30: offline single-seq decode; no prefill route.
             midchunk_capture: None,

@@ -393,6 +393,13 @@ pub struct Qwen3AttentionLayer {
     pub(super) csa_compress_k: KernelHandle,
     /// DeepSeek-V4 CSA prefill attention over [raw | compressed] KV + sink.
     pub(super) prefill_attn_compressed_k: KernelHandle,
+    /// Optional GB10 V4 tensor-core compressed attention; zero means unavailable.
+    pub(super) prefill_attn_compressed_tc_k: KernelHandle,
+    /// Image-span twin of `prefill_attn_compressed_k`: per-query inclusive raw-key
+    /// bounds replace the `(sliding_window, causal)` rule. REQUIRED (hard lookup)
+    /// on a DeepSeek-V4 vision checkpoint — it has no fallback, so absence must
+    /// fail the boot audit. Zero on every model without an image span.
+    pub(super) prefill_attn_compressed_vis_k: KernelHandle,
     /// 4b: # compressed blocks prefill wrote to `mla.compressor.pool` for the
     /// active sequence (= prefill_len / ratio). Decode's compressed arm attends
     /// blocks `[0, this)`. AtomicU32 for interior mutability under prefill's

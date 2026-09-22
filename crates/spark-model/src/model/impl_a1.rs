@@ -71,6 +71,8 @@ impl TransformerModel {
         self_speculative: bool,
         num_drafts: usize,
         vision_encoder: Option<crate::layers::VisionEncoder>,
+        vision_encoder_ds: Option<crate::layers::DeepseekVisionEncoder>,
+        ds_image_params: Option<crate::layers::DsImageParams>,
         ssm_cache_slots: usize,
         ssm_checkpoint_interval: usize,
     ) -> Result<Self> {
@@ -956,6 +958,16 @@ impl TransformerModel {
             mtp_carry: parking_lot::Mutex::new(None),
             mtp_store_range: parking_lot::Mutex::new(super::mtp_carry::StoreRange::EMPTY),
             dflash_hidden_save,
+            // Native DSpark: the capture band is installed POST-construction
+            // by `install_dspark_capture`, once the factory knows the
+            // checkpoint really ships `mtp.{0,1,2}.main_proj` and the head
+            // resolved its kernel. Allocating it here from config alone would
+            // hand a legacy-MTP checkpoint a band nothing writes.
+            dspark_capture: None,
+            dspark_capture_layers: Vec::new(),
+            dspark_capture_rows: 0,
+            dspark_kgamma: 0,
+            dspark_capture_k: spark_runtime::gpu::KernelHandle(0),
             verify_ptok_meta: std::sync::OnceLock::new(),
             dflash_hidden_save_rows,
             dflash_kgamma,
@@ -984,6 +996,9 @@ impl TransformerModel {
             self_speculative,
             last_mtp_hidden_idx: std::sync::atomic::AtomicUsize::new(0),
             vision_encoder,
+            vision_encoder_ds,
+            ds_vision_stage: Mutex::new(None),
+            ds_image_params,
             vision_embed_patches: Mutex::new(0),
             vision_image_grids: Mutex::new(Vec::new()),
             vision_row_base: Mutex::new(0),

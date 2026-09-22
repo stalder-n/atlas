@@ -295,6 +295,34 @@ pub fn build_model(
             None
         };
 
+    // ── DeepSeek-V4 native 3-stage DSpark (0731 / Vision-Exp) ──
+    //
+    // 🔴 NO `ep_rank == 0` GATE, unlike the legacy module above.
+    // `DeepseekV4DsparkHead::needs_comm()` is true, so the stages are
+    // EP-SHARDED (`force_all_experts = false`), BOTH ranks hold a half, and the
+    // block's own all-reduce assembles the routed sum. A rank-0-only load would
+    // either replicate ~5 GB/rank of experts or draft from half a sum.
+    //
+    // `load_v4_dspark_module` returns `None` unless the checkpoint ships
+    // `mtp.0.main_proj.weight`, and `load_v4_mtp_module` returns `None` when it
+    // DOES — so exactly one of the two ever binds.
+    let v4_dspark_module = if config.model_type == "deepseek_v4" && use_speculative {
+        match crate::weight_loader::deepseek_v4::load_v4_dspark_module(
+            &store,
+            &config,
+            gpu.as_ref(),
+            &attn_layer_dtypes,
+        ) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::error!("DeepSeek-V4 native DSpark module load FAILED: {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Capability warning: user asked for `--speculative` but nothing bound an
     // MTP head, so speculative decoding will silently no-op.
     //
@@ -310,6 +338,7 @@ pub fn build_model(
         && mtp_weights.is_empty()
         && glm_mtp_module.is_none()
         && v4_mtp_module.is_none()
+        && v4_dspark_module.is_none()
     {
         match crate::mtp_layout::detect_in_store(&store, &config) {
             None => tracing::warn!(
@@ -329,6 +358,20 @@ pub fn build_model(
     mem.mark("mtp modules (glm/v4)");
     let vision_encoder = loader.load_vision_encoder(&store, &config, gpu.as_ref())?;
     mem.mark("load_vision_encoder");
+
+    // DeepSeek-V4 vision. The TOWER is rank 0's alone: rank 1 receives the
+    // encoded aligner rows over the EP wire (see `model::ep_vision`), so
+    // reading ~0.9 GiB of `vision.*`/`aligner.*` there would be pure waste.
+    // The four image-block vectors go to BOTH ranks — the embedding splice
+    // runs wherever prefill runs, and they are four vectors, not a tower.
+    let ep_rank = comm.as_ref().map(|c| c.rank()).unwrap_or(0);
+    let vision_encoder_ds = if ep_rank == 0 {
+        loader.load_vision_encoder_ds(&store, &config, gpu.as_ref())?
+    } else {
+        None
+    };
+    let ds_image_params = loader.load_ds_image_params(&store, &config, gpu.as_ref())?;
+    mem.mark("load_vision_encoder_ds");
 
     // A multimodal checkpoint's vision tower is read by the weight loader like
     // everything else, but only a loader that implements `load_vision_encoder`
@@ -355,6 +398,26 @@ pub fn build_model(
                  Text capability is unchanged; image input was already unsupported here.",
                 bytes as f64 / (1024.0 * 1024.0 * 1024.0),
                 config.model_type,
+            );
+        }
+    }
+
+    // The DeepSeek tower under its OWN predicate. The Qwen reclaim above
+    // cannot reach it: its names are `vision.*` / `aligner.*`, none of which
+    // start with `model.visual.` / `model.vision` / `visual.`. This is what
+    // frees the tower on rank 1, which deliberately does not bind it. On rank
+    // 0 `vision_encoder_ds` is `Some` and the tensors are bound zero-copy from
+    // exactly these pointers, so nothing is touched. `image_*` is NOT matched:
+    // both ranks bind those.
+    if vision_encoder_ds.is_none() {
+        let (n, bytes) = store.free_matching(gpu.as_ref(), |name| {
+            name.starts_with("vision.") || name.starts_with("aligner.")
+        })?;
+        if n > 0 {
+            tracing::info!(
+                "DeepSeek vision tower: {n} tensors ({:.2} GiB) released on EP rank {ep_rank} \
+                 — this rank binds no DeepSeek vision encoder.",
+                bytes as f64 / (1024.0 * 1024.0 * 1024.0),
             );
         }
     }
@@ -408,6 +471,11 @@ pub fn build_model(
     // same BF16 head via dense_gemv (drafts are re-verified by the target, so the
     // draft head only affects acceptance). DenseWeight is Copy.
     let v4_mtp_lm_head = lm_head;
+    // Same two pointers for the native DSpark head (both `Copy`); the drafter
+    // shares the target's embedding and BF16 LM head, and `mtp_vocab_size` is
+    // deliberately NOT threaded in — the Markov tables are `[vocab_size, rank]`.
+    let v4_dspark_embed = embed;
+    let v4_dspark_lm_head = lm_head;
 
     // ── Step 3b: Post-load MoE prefill transpose (MiniMax EP=2 TTFT fix) ──
     //
@@ -963,6 +1031,8 @@ pub fn build_model(
         self_speculative,
         num_drafts,
         vision_encoder,
+        vision_encoder_ds,
+        ds_image_params,
         ssm_cache_slots,
         ssm_checkpoint_interval,
     )?;
@@ -990,6 +1060,51 @@ pub fn build_model(
             }
             Err(e) => tracing::warn!(
                 "Failed to build DeepSeek-V4 MTP proposer: {e:#}. Speculative decoding disabled."
+            ),
+        }
+    }
+
+    // ── Step 6b2: DeepSeek-V4 native DSpark proposer (post-construction) ──
+    //
+    // Two installs, in this order: the capture band FIRST (the head resolved
+    // `dspark_hc_mean_capture`, and the model owns the capture call sites),
+    // then the proposer. Nothing has run a forward yet, so no capture is in
+    // flight.
+    if let Some(module) = v4_dspark_module {
+        match crate::layers::DeepseekV4DsparkHead::new(
+            module,
+            v4_dspark_embed,
+            v4_dspark_lm_head,
+            model.config_ref(),
+            model.gpu_backend(),
+        ) {
+            Ok(head) => {
+                let capture_layers = model.config_ref().dspark_target_layer_ids.clone();
+                let kernel = head.capture_kernel();
+                // Verify width: the scheduler runs K = num_drafts + 1.
+                match model.install_dspark_capture(
+                    capture_layers,
+                    num_drafts + 1,
+                    max_batch_size,
+                    kernel,
+                ) {
+                    Ok(()) => {
+                        model.set_dflash_proposer(std::sync::Arc::new(head));
+                        tracing::info!(
+                            "DeepSeek-V4 native DSpark speculative decoding: ENABLED \
+                             (3 stages, block_size={}, num_drafts={num_drafts})",
+                            model.config_ref().dspark_block_size,
+                        );
+                    }
+                    Err(e) => tracing::warn!(
+                        "DSpark capture band could not be installed: {e:#}. \
+                         Speculative decoding disabled."
+                    ),
+                }
+            }
+            Err(e) => tracing::warn!(
+                "Failed to build DeepSeek-V4 DSpark proposer: {e:#}. \
+                 Speculative decoding disabled."
             ),
         }
     }

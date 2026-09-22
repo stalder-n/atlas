@@ -56,6 +56,45 @@ hyper_connection = "hyper_connection"
 csa_compress = "csa_compress"
 # CSA prefill attention over [raw causal | compressed windowed] KV + sink.
 prefill_attn_compressed = "prefill_attn_compressed"
+prefill_attn_compressed_tc = "prefill_attn_compressed_tc"
+
+# ── DeepSeek-V4-Flash-Vision-Exp vision path ────────────────────────────────
+# All four are stem-identity (an unlisted .cu already uses its stem); they are
+# spelled out because this file names every module it ships.
+#
+# NOTE: this file is symlinked from kernels/{b200,hopper}/deepseek-v4-flash/
+# nvfp4/KERNEL.toml, so these lines reach two other hardware trees — and they
+# are NOT inert there: both mirrors carry every one of these stems as per-file
+# symlinks into this directory (required by avarok-kernels/tests/
+# inherited_targets.rs::every_model_nvfp4_dir_mirrors_gb10), so hopper (sm_90a)
+# and b200 (sm_100a) compile all of them. The sources use only sm_80-baseline
+# intrinsics and contain no preprocessor conditionals; none has been measured
+# on H100/H200 or B200. kernels/gb10/deepseek-v4.1-flash sets
+# kernel_source = "deepseek-v4-flash" and so compiles these sources too.
+
+# The ViT tower: a same-hardware symlink to
+# kernels/gb10/qwen3.6-35b-a3b/nvfp4/vision_encoder.cu — the tree's idiom for
+# this file, and required: check_kernel_shadows.py RULE2 fails CI on identical
+# regular copies of it. Diverging is an explicit act — replace the link with a
+# real, different file and update tests/deepseek_v4_kernel_audit.rs with it.
+vision_encoder = "vision_encoder"
+# DeepSeek ViT/aligner element ops: 3x3 pixel unshuffle, exact-erf GELU
+# (NOT the tanh approximation vision_gelu uses), unclamped SwiGLU split.
+vision_deepseek = "vision_deepseek"
+# Image-span (bidirectional) twin of prefill_attn_compressed: per-query
+# inclusive raw-key bounds replace the (sliding_window, causal) rule.
+prefill_attn_compressed_vis = "prefill_attn_compressed_vis"
+# VL router twins of common/moe_topk_sqrtsoftplus.cu + common/moe_hash_route.cu,
+# adding the Vision-Exp per-modality selection bias. Copies — common/ is shared
+# by ~30 targets and is never edited for one model; re-derive if common/ moves.
+moe_router_vl = "moe_router_vl"
+
+# ── Native DSpark (3-stage speculative block drafter) ──────────────────────
+# The unweighted mean over the mHC streams that `Transformer.forward` takes at
+# `dspark_target_layer_ids`. Stem-identity, spelled out like the four above.
+# REQUIRED (no fallback): absence must fail the boot audit, so it gets no
+# `[expected_absent]` entry in MODEL.toml.
+dspark_capture = "dspark_capture"
 
 # The fused silu_mul_quant_fp8 entry point is deliberately absent from this
 # swiglu_limit shadow of moe_silu_mul.cu: the launch site checks the kernel

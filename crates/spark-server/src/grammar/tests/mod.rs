@@ -6,6 +6,7 @@ use super::*;
 use crate::tool_parser::ToolDefinition;
 
 mod cold_compile;
+mod deepseek_v4;
 mod engine_state;
 mod gemma4_required;
 mod minimax;

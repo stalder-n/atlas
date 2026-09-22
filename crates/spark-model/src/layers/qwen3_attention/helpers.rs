@@ -36,6 +36,21 @@ pub(crate) fn yarn_rope_mscale(config: &avarok_core::config::ModelConfig) -> f32
 }
 
 impl Qwen3AttentionLayer {
+    /// This block's FFN sublayer.
+    ///
+    /// `ffn` is `pub(super)`, which is right for every consumer inside
+    /// `qwen3_attention`. The native-DSpark proposer is the one caller OUTSIDE
+    /// it that needs the component itself rather than a forward:
+    /// `layers/deepseek_v4_dspark` drives each of its three stage bodies site
+    /// by site (`hc_pre → attn → hc_post → hc_pre → ffn → hc_post`), because
+    /// its attention is γ mutually-visible queries over a ring of MAIN-MODEL
+    /// KV with no paged cache — which neither `decode()` nor `prefill()` can
+    /// express. Only the FFN half of that sequence is reusable verbatim, and
+    /// this is how it is reached; `mla` and `hc` are already `pub(crate)`.
+    pub(crate) fn ffn_component(&self) -> &crate::layers::FfnComponent {
+        &self.ffn
+    }
+
     /// Set MLA weights for 2-step latent decode. When set, decode uses
     /// latent→norm→expand instead of single-step GEMV.
     pub fn set_mla_weights(&mut self, mla: MlaWeights) {
