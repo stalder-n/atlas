@@ -253,6 +253,15 @@ impl Qwen3AttentionLayer {
         // rope in its tail; `v_out` is the plain latent (kept for the cache
         // assembly below). Attention must use K==k_out for V too. The per-head
         // sink keeps the softmax denominator consistent with the decode path.
+        // Image spans never reach the paged path: `ImageWindow::for_chunk`
+        // refuses a non-zero chunk start, and this entry point is only taken
+        // when `seq_len_start > 0`. Refuse loudly rather than attend a
+        // bidirectional span causally, which would be a silent wrong answer.
+        anyhow::ensure!(
+            ctx.image_window.is_none(),
+            "V4 paged prefill cannot serve an image span: the bounds are chunk-local and this \
+             path only runs on chunk 1+."
+        );
         ops::prefill_attention_512_sink(
             ctx.gpu,
             prefill_k,

@@ -544,6 +544,11 @@ impl TransformerModel {
             gdn_exact_replay: false,
             gdn_write_on_accept: false,
             token_ids: None,
+            // Q12 kernel-batched MULTI-STREAM prefill: a per-chunk bounds pair
+            // is per-stream state the stacked `BatchedAttnMetadata` has no slot
+            // for, and this path requires `seq_len_start > 0` anyway. Image
+            // prompts are rejected upstream, so no span reaches here.
+            image_window: None,
             host_token_ids: None,
             // #30: batched multi-seq prefill legitimately mixes adapters and keeps
             // the bgmv (via multi_seq/qkv.rs); its attn_metadata is None so it never

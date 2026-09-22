@@ -652,6 +652,21 @@ impl Qwen3AttentionLayer {
             } else {
                 spark_runtime::gpu::KernelHandle(0)
             },
+            // Image-span prefill attention. Only a DeepSeek-V4 VISION
+            // checkpoint can ever launch it (it is the sole path that expresses
+            // a bidirectional span), and there it has no causal fallback — so a
+            // missing module must fail the boot: hard lookup. Zero everywhere
+            // else, exactly like the tensor-core twin above.
+            prefill_attn_compressed_vis_k: if probes.compressed_attn
+                && config
+                    .vision
+                    .as_ref()
+                    .is_some_and(|v| v.flavor == avarok_core::config::VisionFlavor::DeepseekV4)
+            {
+                gpu.kernel("prefill_attn_compressed_vis", "prefill_attn_compressed_vis")?
+            } else {
+                spark_runtime::gpu::KernelHandle(0)
+            },
             v4_comp_pool_filled: std::sync::atomic::AtomicU32::new(0),
             v4_comp_prev_valid: std::sync::atomic::AtomicBool::new(false),
             v4_decode_started: std::sync::atomic::AtomicBool::new(false),

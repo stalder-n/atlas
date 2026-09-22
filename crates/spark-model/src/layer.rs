@@ -361,6 +361,15 @@ pub struct ForwardContext<'a> {
     /// reading them back off the device costs a synchronous D2H per decode
     /// step — pure overhead, and capture-unsupported inside a CUDA graph.
     pub host_token_ids: Option<&'a [u32]>,
+    /// DeepSeek-V4 image-span attention bounds for THIS chunk: `(win_lo, win_hi)`,
+    /// each `[chunk_len]` u32, INCLUSIVE, indices within the chunk. Uploaded once
+    /// per chunk by the prefill driver when
+    /// `vision_deepseek::visibility::has_image_span`. `Some` makes the V4 prefill
+    /// attention take `prefill_attn_compressed_vis`, whose raw arm walks
+    /// `win_lo[q]..=win_hi[q]` instead of the `(sliding_window, causal)` rule —
+    /// the only way to express a bidirectional image span. `None` on every other
+    /// pass, and every existing kernel path is then byte-identical.
+    pub image_window: Option<(DevicePtr, DevicePtr)>,
     /// #30 (routed-prefill precision): the REQUEST slot's per-layer LoRA pairs,
     /// GLOBAL-layer-indexed (`len == num_hidden_layers`), set ONLY at the prefill
     /// entries and ONLY when the request routes to a NON-active slot. `Some` makes
