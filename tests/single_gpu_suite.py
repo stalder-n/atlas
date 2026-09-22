@@ -848,15 +848,9 @@ DS_MIN_IMAGE_TOKEN_DELTA = 80
 def _prompt_tokens(result):
     """usage.prompt_tokens, or None when the response carries no usage."""
     try:
-        value = result["usage"]["prompt_tokens"]
-        return int(value) if isinstance(value, (int, float)) else None
+        return int(result["usage"]["prompt_tokens"])
     except (KeyError, TypeError, ValueError):
         return None
-
-
-def _ds_visible(result):
-    """Visible answer text, with reasoning blocks stripped."""
-    return _strip_thinking(extract_text(result))
 
 
 def _ds_structural_failure(result, visible):
@@ -931,7 +925,7 @@ def run_vision_ds_tests(base_url, model):
                                temperature=0.0, timeout=300)
     one_result, _ = chat(base_url, model, one, max_tokens=192,
                          temperature=0.0, timeout=300)
-    visible = _ds_visible(two_result)
+    visible = _strip_thinking(extract_text(two_result))
     status = _ds_structural_failure(two_result, visible)
     delta = None
     if status is None:
@@ -970,7 +964,7 @@ def run_vision_ds_tests(base_url, model):
                                      temperature=0.0, timeout=300)
     tool_base, _ = chat(base_url, model, without_image, max_tokens=192,
                         temperature=0.0, timeout=300)
-    visible = _ds_visible(tool_result)
+    visible = _strip_thinking(extract_text(tool_result))
     status = _ds_structural_failure(tool_result, visible)
     delta = None
     if status is None:
@@ -991,8 +985,8 @@ def run_vision_ds_tests(base_url, model):
                                 temperature=0.0, timeout=300)
     second, _ = chat(base_url, model, one, max_tokens=128,
                      temperature=0.0, timeout=300)
-    first_text = _ds_visible(first)
-    second_text = _ds_visible(second)
+    first_text = _strip_thinking(extract_text(first))
+    second_text = _strip_thinking(extract_text(second))
     status = _ds_structural_failure(first, first_text)
     if status is None:
         status = _ds_structural_failure(second, second_text)

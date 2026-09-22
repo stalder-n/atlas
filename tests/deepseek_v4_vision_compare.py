@@ -75,12 +75,12 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def resolve_reference(ref_dir: str | None, ref_cache: str | None) -> Path:
+def resolve_reference(ref_dir: str | None) -> Path:
     """Return a directory holding the two pinned reference sources, verified."""
     if ref_dir:
         directory = Path(ref_dir)
     else:
-        directory = Path(ref_cache or DEFAULT_REF_CACHE) / REF_REVISION
+        directory = DEFAULT_REF_CACHE / REF_REVISION
         directory.mkdir(parents=True, exist_ok=True)
         for name in REF_FILES:
             target = directory / name
@@ -176,7 +176,7 @@ def load_vision_tensors(checkpoint: Path):
     return tensors
 
 
-def build_reference_towers(vision_mod, args, tensors, dtype):
+def build_reference_towers(vision_mod, args, tensors):
     """Instantiate the reference ViT + Aligner and load the checkpoint weights."""
     vit = vision_mod.ViT(args)
     aligner = vision_mod.Aligner(args)
@@ -187,10 +187,10 @@ def build_reference_towers(vision_mod, args, tensors, dtype):
             raise CompareError(
                 f"{prefix}* does not match the reference module: "
                 f"missing={sorted(missing)[:6]} unexpected={sorted(unexpected)[:6]}")
-    return vit.to(dtype).eval(), aligner.to(dtype).eval()
+    return vit.eval(), aligner.eval()
 
 
-def reference_encode(image_path: str, args, image_processor_mod, vit, aligner, dtype):
+def reference_encode(image_path: str, args, image_processor_mod, vit, aligner):
     """Run the reference tower on one image. Returns (rows_f32, geometry dict)."""
     import numpy as np
     import torch
@@ -198,7 +198,7 @@ def reference_encode(image_path: str, args, image_processor_mod, vit, aligner, d
     patches, n_vit_h, n_vit_w, n_llm_h, n_llm_w = image_processor_mod.load_image(
         {"url": image_path}, args)
     with torch.no_grad():
-        hidden = vit(patches.to(dtype), n_vit_h, n_vit_w)
+        hidden = vit(patches.to(torch.float32), n_vit_h, n_vit_w)
         rows = aligner(hidden, n_vit_h, n_vit_w)
     array = rows.to(torch.float32).numpy().astype(np.float32, copy=True)
     geometry = {"n_vit_h": n_vit_h, "n_vit_w": n_vit_w,
@@ -221,17 +221,10 @@ def read_dump(dump_dir: Path, index: int, hidden: int):
     meta_path = dump_dir / f"image_{index}.json"
     rows_path = dump_dir / f"image_{index}.bf16"
     if not rows_path.is_file():
-        legacy = dump_dir / f"image_{index}.bin"
-        if legacy.is_file():
-            print(f"  WARNING: {legacy.name} found instead of {rows_path.name} — the "
-                  "dump hook is writing the Qwen `.bin` convention; reading it anyway",
-                  flush=True)
-            rows_path = legacy
-        else:
-            raise CompareError(
-                f"{rows_path} missing. AVAROK_DS_VISION_DUMP produced no rows for image "
-                f"{index} — is it set on rank 0 (the only rank that owns the ViT), and is "
-                "the directory mounted out of the container?")
+        raise CompareError(
+            f"{rows_path} missing. AVAROK_DS_VISION_DUMP produced no rows for image "
+            f"{index} — is it set on rank 0 (the only rank that owns the ViT), and is "
+            "the directory mounted out of the container?")
     if not meta_path.is_file():
         raise CompareError(f"{meta_path} missing: the dump has rows but no geometry sidecar")
     geometry = json.loads(meta_path.read_text())
@@ -296,7 +289,7 @@ def mode_trigger(args) -> None:
     body = {"model": args.model, "messages": [{"role": "user", "content": content}],
             "max_tokens": 16, "temperature": 0, "stream": False}
     headers = {"Content-Type": "application/json"}
-    key = os.environ.get("ATLAS_API_KEY") or os.environ.get("AVAROK_API_KEY")
+    key = os.environ.get("ATLAS_API_KEY")
     if key:
         headers["Authorization"] = "Bearer " + key
     request = urllib.request.Request(
@@ -310,17 +303,15 @@ def mode_trigger(args) -> None:
 
 
 def mode_diff(args) -> int:
-    reference_dir = resolve_reference(args.ref_dir, args.ref_cache)
+    reference_dir = resolve_reference(args.ref_dir)
     vision_mod, image_processor_mod = import_reference(reference_dir)
     checkpoint = Path(args.checkpoint)
     config = load_config(checkpoint)
     ref_args = reference_args(config)
     hidden = ref_args.dim
 
-    import torch
-    dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16}[args.ref_dtype]
     tensors = load_vision_tensors(checkpoint)
-    vit, aligner = build_reference_towers(vision_mod, ref_args, tensors, dtype)
+    vit, aligner = build_reference_towers(vision_mod, ref_args, tensors)
 
     dump_dir = Path(args.dump)
     if not dump_dir.is_dir():
@@ -330,12 +321,12 @@ def mode_diff(args) -> int:
             "mounted out of the container?")
 
     report = {"revision": REF_REVISION, "checkpoint": str(checkpoint),
-              "ref_dtype": args.ref_dtype, "min_cos": args.min_cos, "images": []}
+              "min_cos": args.min_cos, "images": []}
     failures = 0
     for index, image_path in enumerate(args.image):
         atlas_rows, atlas_geometry = read_dump(dump_dir, index, hidden)
         ref_rows, ref_geometry = reference_encode(
-            image_path, ref_args, image_processor_mod, vit, aligner, dtype)
+            image_path, ref_args, image_processor_mod, vit, aligner)
         # Geometry first: a grid mismatch makes every numeric metric meaningless.
         if atlas_geometry != ref_geometry:
             raise CompareError(
@@ -362,8 +353,6 @@ def mode_diff(args) -> int:
         Path(args.output).write_text(json.dumps(report, indent=2) + "\n")
         print(f"  report written to {args.output}")
     print("PASS" if report["pass"] else f"FAIL ({failures} image(s) below cosine {args.min_cos})")
-    if args.report_only:
-        return 0
     return 0 if report["pass"] else 1
 
 
@@ -408,13 +397,11 @@ def _selftest_image(path: Path) -> None:
     Image.fromarray(pixels, "RGB").save(path)
 
 
-def _selftest_args(checkpoint: Path, dump: Path, image: Path, reference_dir: Path,
-                   min_cos: float = 0.999) -> argparse.Namespace:
+def _selftest_args(checkpoint: Path, dump: Path, image: Path,
+                   reference_dir: Path) -> argparse.Namespace:
     return argparse.Namespace(
-        mode="diff", checkpoint=str(checkpoint), dump=str(dump), image=[str(image)],
-        ref_dir=str(reference_dir), ref_cache=None, ref_dtype="float32",
-        min_cos=min_cos, report_only=False, output=None,
-        base_url="", model=None, timeout=600)
+        checkpoint=str(checkpoint), dump=str(dump), image=[str(image)],
+        ref_dir=str(reference_dir), min_cos=0.999, output=None)
 
 
 def mode_selftest(args) -> int:
@@ -426,10 +413,9 @@ def mode_selftest(args) -> int:
     """
     import numpy as np
 
-    reference_dir = resolve_reference(args.ref_dir, args.ref_cache)
+    reference_dir = resolve_reference(args.ref_dir)
     vision_mod, image_processor_mod = import_reference(reference_dir)
     ref_args = reference_args(SELFTEST_CONFIG)
-    import torch
 
     failures = []
     with tempfile.TemporaryDirectory() as raw_root:
@@ -438,9 +424,9 @@ def mode_selftest(args) -> int:
         image = root / "synthetic_504.png"
         _selftest_image(image)
         tensors = load_vision_tensors(checkpoint)
-        vit, aligner = build_reference_towers(vision_mod, ref_args, tensors, torch.float32)
+        vit, aligner = build_reference_towers(vision_mod, ref_args, tensors)
         rows, geometry = reference_encode(
-            str(image), ref_args, image_processor_mod, vit, aligner, torch.float32)
+            str(image), ref_args, image_processor_mod, vit, aligner)
         print(f"  reference geometry {geometry}, rows {rows.shape}", flush=True)
         if geometry != {"n_vit_h": 36, "n_vit_w": 36, "n_llm_h": 12, "n_llm_w": 12}:
             failures.append(f"504x504 must pass through unresized, got {geometry}")
@@ -500,12 +486,8 @@ def main() -> int:
     parser.add_argument("--image", action="append", default=[],
                         help="image path, repeatable; order must match image_<i>")
     parser.add_argument("--ref-dir", help="directory holding the pinned reference sources")
-    parser.add_argument("--ref-cache", help=f"download cache (default {DEFAULT_REF_CACHE})")
-    parser.add_argument("--ref-dtype", choices=["float32", "bfloat16"], default="float32")
     parser.add_argument("--min-cos", type=float, default=0.99,
                         help="bring-up signal, not a certified tolerance")
-    parser.add_argument("--report-only", action="store_true",
-                        help="always exit 0 on numeric disagreement (structure still fails)")
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--output", help="write the JSON report here")
     args = parser.parse_args()
