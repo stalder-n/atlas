@@ -1091,17 +1091,20 @@ pub fn build_model(
                     Ok(()) => {
                         model.set_dflash_proposer(std::sync::Arc::new(head));
                         tracing::info!(
-                            "DeepSeek-V4 native DSpark speculative decoding: ENABLED                              (3 stages, block_size={}, num_drafts={num_drafts})",
+                            "DeepSeek-V4 native DSpark speculative decoding: ENABLED \
+                             (3 stages, block_size={}, num_drafts={num_drafts})",
                             model.config_ref().dspark_block_size,
                         );
                     }
                     Err(e) => tracing::warn!(
-                        "DSpark capture band could not be installed: {e:#}.                          Speculative decoding disabled."
+                        "DSpark capture band could not be installed: {e:#}. \
+                         Speculative decoding disabled."
                     ),
                 }
             }
             Err(e) => tracing::warn!(
-                "Failed to build DeepSeek-V4 DSpark proposer: {e:#}.                  Speculative decoding disabled."
+                "Failed to build DeepSeek-V4 DSpark proposer: {e:#}. \
+                 Speculative decoding disabled."
             ),
         }
     }

@@ -51,10 +51,12 @@ pub(super) const ATTN_BLOCK_ROWS: usize = 16;
 impl DeepseekV4DsparkHead {
     /// `normed` `[γ, hidden]` → this stage's attention output `[γ, hidden]`.
     ///
-    /// `position` is the last VERIFIED sequence position; the γ draft queries
-    /// sit at `position + 1 ..= position + γ`, exactly as the reference's
-    /// `start_pos + 1 … start_pos + γ`. `ring` is THIS stage's per-sequence KV
-    /// ring (it lives on `DsparkProposerState`, not on the head).
+    /// `position` is the first UNPROCESSED sequence position (the scheduler's
+    /// `seq.seq_len`, where `last_token` sits); the γ draft queries sit at
+    /// `position .. position + γ`, which is the reference's `start_pos + 1 …
+    /// start_pos + γ` since its `start_pos` is the last PROCESSED position
+    /// (`ring.rs` module doc). `ring` is THIS stage's per-sequence KV ring (it
+    /// lives on `DsparkProposerState`, not on the head).
     pub(super) fn stage_attention(
         &self,
         stage: usize,
@@ -153,9 +155,9 @@ impl DeepseekV4DsparkHead {
             stream,
         )?;
 
-        // ── 3. Interleaved RoPE at positions `position + 1 ..= position + γ` ──
-        let positions: Vec<u8> = (1..=self.block)
-            .flat_map(|i| ((position + i) as u32).to_le_bytes())
+        // ── 3. Interleaved RoPE at positions `position .. position + γ` ──
+        let positions: Vec<u8> = super::ring::block_positions(position, self.block)
+            .flat_map(|p| (p as u32).to_le_bytes())
             .collect();
         ctx.gpu.copy_h2d_async(&positions, s.positions, stream)?;
         ops::mla_q_rope_extract_batched(

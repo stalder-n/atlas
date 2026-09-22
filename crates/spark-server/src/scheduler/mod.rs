@@ -293,7 +293,8 @@ pub fn run(
     // is the only place that distinction is visible at runtime.
     if use_mtp && let Some(gamma) = model.dflash_gamma() {
         tracing::info!(
-            "Block drafter active: trained γ={gamma}, driven at num_drafts={num_drafts}              (verify K={})",
+            "Block drafter active: trained γ={gamma}, driven at num_drafts={num_drafts} \
+             (verify K={})",
             num_drafts + 1,
         );
     }

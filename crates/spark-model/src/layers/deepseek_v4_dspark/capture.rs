@@ -23,6 +23,31 @@
 //! fallback). The learned `hyper_connection::hc_head` in the same target is the
 //! WEIGHTED Sinkhorn collapse and is a different function; GLM's unweighted
 //! `glm5next_hc_head` lives in another model target's module.
+//!
+//! ## The band law (the ONE statement of it)
+//!
+//! **Band row `i` holds target row `i` of the last target step**, for every
+//! path that writes the band:
+//!
+//! | target step | rows the step runs | rows written | newest committed row |
+//! |---|---|---|---|
+//! | serial decode (`decode_a3`) | 1 | `0..1` | 0 |
+//! | K-row verify (`verify_b/c/c2/d`, single sequence) | K | `0..K` | `num_accepted` |
+//!
+//! Target row `i` of a step that started at first-unprocessed position `p`
+//! is sequence position `p + i`, so band rows `0..=num_accepted` are the
+//! positions the verify COMMITTED, oldest first, and row `num_accepted` is the
+//! bonus generator — the row the scheduler points `save_hidden_for_mtp` at
+//! before every propose (0 after a serial decode). That index is therefore the
+//! single source for "how many committed rows does the band hold":
+//! [`rows_through`]`(newest_row)`. The DSpark branch of `try_dflash_capture`
+//! writes [`rows_through`]`(token_idx)` rows — all of `0..=token_idx` — and
+//! the propose ingests [`rows_through`]`(last_mtp_hidden_idx)` of them; the
+//! ring catch-up ([`super::ring::catch_up`]) reads the newest `owed` of those.
+//!
+//! The rejected drafts' rows (`num_accepted + 1 .. K`) are written too and
+//! never read: a K-row verify captures every row because the accept count is
+//! not known inside the (graph-captured) layer loop.
 
 use anyhow::Result;
 use spark_runtime::gpu::{DevicePtr, GpuBackend, KernelHandle};
@@ -41,6 +66,14 @@ pub fn row_stride_elems(n_targets: usize, hidden: usize) -> usize {
 /// Element offset of one capture layer's slice inside a row.
 pub fn slot_offset_elems(slot: usize, hidden: usize) -> usize {
     slot * hidden
+}
+
+/// How many band rows `0..=row` is — the band law's one arithmetic fact,
+/// shared by the writer (`try_dflash_capture(layer, token_idx)` captures
+/// `rows_through(token_idx)` rows) and the reader (the propose ingests
+/// `rows_through(last_mtp_hidden_idx)` committed rows). See the module doc.
+pub fn rows_through(row: usize) -> usize {
+    row + 1
 }
 
 /// Row index of the `k`-th verify row of sequence `seq_idx` in a band-major
@@ -145,5 +178,21 @@ mod tests {
         for kgamma in 1..=4usize {
             assert_eq!(band_row(0, 0, kgamma, kgamma), Some(0));
         }
+    }
+
+    /// The writer and the reader of the band use the same count: a verify
+    /// that captured through row `K-1` wrote every row a propose that commits
+    /// through row `num_accepted` can ask for.
+    #[test]
+    fn a_verify_writes_every_row_a_propose_can_commit() {
+        for k in 2..=4usize {
+            let written = rows_through(k - 1);
+            assert_eq!(written, k);
+            for num_accepted in 0..k {
+                assert!(rows_through(num_accepted) <= written);
+            }
+        }
+        // A serial decode writes row 0 and commits row 0.
+        assert_eq!(rows_through(0), 1);
     }
 }

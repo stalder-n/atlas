@@ -15,6 +15,22 @@
 //! and they are IDENTICAL for every one of the γ queries — the block is
 //! bidirectional over its own positions and sees the whole valid ring.
 //!
+//! ## `position` is the FIRST UNPROCESSED position, not the reference's `start_pos`
+//!
+//! The reference's `start_pos` is the LAST PROCESSED position: `forward_spec`
+//! writes its hidden into the ring and puts the block at `start_pos + 1 ..`.
+//! Atlas's scheduler hands `propose()` `seq.seq_len` — the position of the
+//! not-yet-processed `last_token`, i.e. `start_pos + 1` — exactly as
+//! `deepseek_v4_mtp.rs` decodes `last_token` at KV slot `seq_len` under that
+//! same `position`. So, everywhere in this module:
+//!
+//! * the ring is complete when it holds positions `0 .. position`
+//!   (`next_pos == position`, `ring_len == min(window, position)` — the
+//!   reference's `min(window, start_pos + 1)`);
+//! * a warm propose owes positions `next_pos .. position`;
+//! * the γ block queries sit at `position .. position + γ` (the reference's
+//!   `start_pos + 1 .. start_pos + 1 + γ`).
+//!
 //! ## Why Atlas places the block KV at `ring_len` instead of at `window`
 //!
 //! The reference can hand `sparse_attn` an arbitrary index list.
@@ -59,6 +75,34 @@ pub fn ring_slots(window: usize, block: usize) -> usize {
     window + block
 }
 
+/// RoPE positions of the γ block queries drafted from first-unprocessed
+/// `position`: `position .. position + block`.
+pub fn block_positions(position: usize, block: usize) -> std::ops::Range<usize> {
+    position..position + block
+}
+
+/// `next_pos` once a propose at `position` has caught up: the ring holds
+/// `0..position` — or more, if it already did.
+pub fn after_propose(next_pos: usize, position: usize) -> usize {
+    next_pos.max(position)
+}
+
+/// Split `count` consecutive positions from `first_pos` into runs that do not
+/// cross the ring wrap: `(first position, its slot, run length)`, in order.
+/// The sum of the run lengths is `count`.
+pub fn runs(first_pos: usize, count: usize, window: usize) -> Vec<(usize, usize, usize)> {
+    let mut out = Vec::new();
+    let mut done = 0usize;
+    while done < count {
+        let pos = first_pos + done;
+        let s = slot(pos, window);
+        let run = (count - done).min(window - s);
+        out.push((pos, s, run));
+        done += run;
+    }
+    out
+}
+
 /// Prompt positions whose captures seed the ring, oldest first, paired with
 /// the slot each lands in.
 ///
@@ -73,14 +117,18 @@ pub fn prefill_drain(prompt_len: usize, window: usize) -> Vec<(usize, usize)> {
 /// Which committed capture rows feed the ring on a warm propose.
 ///
 /// `next_pos` is the first sequence position whose ring entry is missing;
-/// `position` is the position the propose is drafting FROM (so positions
-/// `next_pos..=position` are the ones still owed). `committed` is how many
-/// rows the last verify left in the capture band (`num_accepted + 1`).
+/// `position` is the first UNPROCESSED position (the one `last_token` sits
+/// at), so positions `next_pos..position` are the ones still owed.
+/// `committed` is how many band rows hold the NEWEST committed positions,
+/// oldest first — the band law in [`super::capture`]: `newest_row + 1`, where
+/// `newest_row` is the verify row the scheduler pointed `save_hidden_for_mtp`
+/// at (`num_accepted` after a verify, 0 after a serial decode).
 ///
-/// A `gap > 0` means the sequence advanced without a propose — serial-decode
-/// bootstrap, adaptive-speculation suspend, preemption/resume, a prefix-cache
-/// warm turn. The design DEGRADES there (older ring entries, lower acceptance)
-/// and cannot corrupt: every draft is re-verified by the target.
+/// A `gap > 0` means positions were committed without a capture row left to
+/// rebuild them — several serial decodes in a row (adaptive-speculation
+/// suspend), preemption/resume, a prefix-cache warm turn. The design DEGRADES
+/// there (older ring entries, lower acceptance) and cannot corrupt: every
+/// draft is re-verified by the target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CatchUp {
     /// First absolute sequence position this catch-up writes.
@@ -94,10 +142,10 @@ pub struct CatchUp {
 }
 
 pub fn catch_up(next_pos: usize, position: usize, committed: usize) -> CatchUp {
-    let owed = (position + 1).saturating_sub(next_pos);
+    let owed = position.saturating_sub(next_pos);
     let count = owed.min(committed);
     CatchUp {
-        first_pos: position + 1 - count,
+        first_pos: position - count,
         count,
         first_row: committed - count,
         gap: owed - count,
@@ -192,13 +240,13 @@ mod tests {
     /// NEWEST `owed` of them and reads them from the tail of the band.
     #[test]
     fn catch_up_consumes_the_newest_committed_rows() {
-        // Steady state: one accepted token per verify, exactly one owed row.
+        // Steady state: a verify at first-unprocessed position `next_pos`
+        // commits `accepted + 1` positions, so the next propose arrives at
+        // `next_pos + accepted + 1` and owes exactly the committed rows.
         for accepted in 0..4usize {
             let committed = accepted + 1;
-            // The propose after this verify drafts from position
-            // `next_pos + accepted`.
             let next_pos = 100usize;
-            let position = next_pos + accepted;
+            let position = next_pos + committed;
             let c = catch_up(next_pos, position, committed);
             assert_eq!(c.count, committed, "accepted={accepted}");
             assert_eq!(c.first_pos, next_pos);
@@ -209,9 +257,9 @@ mod tests {
 
     #[test]
     fn catch_up_reports_a_gap_it_cannot_fill() {
-        // Ten positions owed, only two capture rows survive: the two NEWEST
-        // positions are rebuilt and eight are reported as a gap.
-        let c = catch_up(90, 99, 2);
+        // Ten positions owed (90..100), only two capture rows survive: the two
+        // NEWEST positions are rebuilt and eight are reported as a gap.
+        let c = catch_up(90, 100, 2);
         assert_eq!(
             c,
             CatchUp {
@@ -225,7 +273,8 @@ mod tests {
 
     #[test]
     fn catch_up_is_empty_when_the_ring_is_already_current() {
-        let c = catch_up(100, 99, 4);
+        // The ring holds 0..100 and the propose drafts from 100: nothing owed.
+        let c = catch_up(100, 100, 4);
         assert_eq!(c.count, 0);
         assert_eq!(c.gap, 0);
         assert_eq!(c.first_pos, 100);
@@ -236,7 +285,7 @@ mod tests {
     /// More committed rows than owed positions: only the owed tail is used.
     #[test]
     fn catch_up_never_reads_more_rows_than_it_owes() {
-        let c = catch_up(100, 100, 4);
+        let c = catch_up(100, 101, 4);
         assert_eq!(c.count, 1);
         assert_eq!(c.first_pos, 100);
         assert_eq!(c.first_row, 3);
@@ -248,7 +297,9 @@ mod tests {
     #[test]
     fn catch_up_across_the_wrap_keeps_modular_slots() {
         let window = 128usize;
-        let c = catch_up(window - 1, window, 2);
+        // Positions `window-1` and `window` were committed; the propose is at
+        // `window + 1`.
+        let c = catch_up(window - 1, window + 1, 2);
         assert_eq!(c.count, 2);
         assert_eq!(c.first_pos, window - 1);
         let slots: Vec<usize> = (c.first_pos..c.first_pos + c.count)

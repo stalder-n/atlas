@@ -915,7 +915,8 @@ pub(crate) fn load_model(
     {
         let placeholder = tokenizer.arm_ds_vision(config.vocab_size as u32)?;
         tracing::info!(
-            "DeepSeek-V4 image prompt path armed: <｜deepseek_image｜> = {placeholder},              sentinel base (vocab_size) = {}",
+            "DeepSeek-V4 image prompt path armed: <｜deepseek_image｜> = {placeholder}, \
+             sentinel base (vocab_size) = {}",
             config.vocab_size,
         );
     }
@@ -1016,7 +1017,8 @@ pub(crate) fn load_model(
         let capped = asked.min(DSPARK_MAX_DRAFTS);
         if capped != asked {
             tracing::warn!(
-                "DSpark: --num-drafts {asked} clamped to {capped}; the K=γ verify ladder is                  DFlash-only, so drafts.len() >= 4 cannot be verified on this path"
+                "DSpark: --num-drafts {asked} clamped to {capped}; the K=γ verify ladder is \
+                 DFlash-only, so drafts.len() >= 4 cannot be verified on this path"
             );
         }
         capped

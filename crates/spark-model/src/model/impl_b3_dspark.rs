@@ -29,11 +29,34 @@ use anyhow::Result;
 use super::TransformerModel;
 use crate::layers::DsparkProposerState;
 use crate::layers::deepseek_v4_dspark::{
-    launch_hc_mean_capture, row_stride_elems, slot_offset_elems,
+    launch_hc_mean_capture, row_stride_elems, rows_through, slot_offset_elems,
 };
+use crate::speculative::ProposerState;
 use crate::traits::SequenceState;
 
 impl TransformerModel {
+    /// Tell the sequence's DSpark state how many band rows hold committed
+    /// positions, right before its propose. No-op unless DSpark is active.
+    ///
+    /// The source is `last_mtp_hidden_idx` — the target row the scheduler
+    /// pointed `save_hidden_for_mtp` at before this propose (`num_accepted`
+    /// after a verify, 0 after a serial decode; the EP worker latches the same
+    /// index from the `EP_CMD_MTP_PROPOSE` fourth word). Under the band law
+    /// (`deepseek_v4_dspark/capture.rs`) that row is the newest committed one,
+    /// so the band holds `rows_through(idx)` committed rows. `after_verify`
+    /// cannot supply this: the serial-decode bootstrap never calls it.
+    pub(super) fn dspark_note_committed_rows(&self, state: &mut dyn ProposerState) {
+        if self.dspark_capture.is_none() {
+            return;
+        }
+        if let Some(st) = state.as_any_mut().downcast_mut::<DsparkProposerState>() {
+            let idx = self
+                .last_mtp_hidden_idx
+                .load(std::sync::atomic::Ordering::Relaxed);
+            st.committed_rows = rows_through(idx);
+        }
+    }
+
     /// Slot of `layer_idx` in the capture band's feature axis, or `None` when
     /// this layer is not a DSpark target.
     fn dspark_slot(&self, layer_idx: usize) -> Option<usize> {
@@ -45,9 +68,12 @@ impl TransformerModel {
     /// Capture `k` rows of the highway starting at `src_row0` into band rows
     /// `dst_row0 .. dst_row0 + k`.
     ///
-    /// Serves both the single-token decode capture (`k = 1`, `src_row0 =
-    /// token_idx`) and the K=γ verify capture, which is why it takes the same
-    /// four coordinates `try_dflash_capture_all_at` does.
+    /// Every single-sequence caller passes `src_row0 = dst_row0 = 0` and
+    /// `k = rows_through(token_idx)` — the band law in
+    /// `deepseek_v4_dspark/capture.rs`: band row i IS target row i, for a
+    /// decode (`k = 1`) and a K-row verify (`k = K`) alike. The four
+    /// coordinates exist for the cross-sequence `try_dflash_capture_all_at`
+    /// form.
     pub(super) fn try_dspark_capture_rows(
         &self,
         layer_idx: usize,

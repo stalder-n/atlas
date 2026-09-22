@@ -236,6 +236,7 @@ impl TransformerModel {
                 }
             }
         }
+        self.dspark_note_committed_rows(prop_state.as_mut());
         let drafts = proposer.propose(
             token,
             self.mtp_hidden_save,
@@ -407,7 +408,12 @@ impl TransformerModel {
         stream: u64,
     ) -> Result<()> {
         if self.dspark_capture.is_some() {
-            return self.try_dspark_capture_rows(layer_idx, token_idx, 1, 0, stream);
+            // Band law (`deepseek_v4_dspark/capture.rs`): band row i = target
+            // row i, so a verify that names its last row K-1 writes ALL of
+            // 0..=K-1 — the propose commits rows 0..=num_accepted, which the
+            // single-row form would leave unwritten. A decode names row 0.
+            let rows = crate::layers::deepseek_v4_dspark::rows_through(token_idx);
+            return self.try_dspark_capture_rows(layer_idx, 0, rows, 0, stream);
         }
         let dst = match self.dflash_hidden_save {
             Some(p) => p,

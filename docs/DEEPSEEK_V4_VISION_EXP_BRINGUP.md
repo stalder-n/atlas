@@ -370,25 +370,40 @@ NOT verified anywhere on this host, in descending order of risk:
 3. **`dspark_capture.cu`.** New, never compiled.
 4. **The EP=2 lane.** Both ranks must run the propose; the capture branch in
    `impl_b3_dspark.rs` deliberately has NO rank-0 early return. Never exercised.
-5. **Ring/scheduler lockstep.** Any path that advances a sequence without a
-   propose (serial-decode bootstrap, adaptive-speculation suspend,
+5. **Ring/scheduler lockstep.** The propose's `position` is the scheduler's
+   `seq.seq_len` — the first UNPROCESSED position, one past the reference's
+   `start_pos` — and the ring must hold exactly `0..position` when the block
+   runs (`layers/deepseek_v4_dspark/ring.rs`, module doc). Two things keep it
+   there, and both are host-tested as pure arithmetic
+   (`ring_contract_tests.rs::the_bring_up_trace_*`,
+   `..::a_k_row_verify_writes_every_row_*`):
+
+   * the capture band law — band row `i` is target row `i` of the last target
+     step, for a serial decode (row 0) and a K-row verify (rows `0..K`) alike
+     (`capture.rs`, module doc; the DSpark branch of `try_dflash_capture` in
+     `model/impl_b3.rs`);
+   * the committed-row count the propose ingests —
+     `rows_through(last_mtp_hidden_idx)`, the verify row the scheduler pointed
+     `save_hidden_for_mtp` at (`num_accepted`, or 0 after a serial decode),
+     set by `dspark_note_committed_rows` right before the propose. On the
+     served path every sequence's first propose follows ONE serial decode
+     (the non-DFlash bootstrap), so it ingests band row 0 as position `P` and
+     owes nothing.
+
+   Any path that commits more positions than one target step captured
+   (several serial decodes in a row under adaptive-speculation suspend,
    preemption/resume, a prefix-cache warm turn) leaves a ring gap. The design
    degrades rather than corrupts, and counts the gap:
    `RUST_LOG=spark_model=debug` prints `DSpark ring gap: …`. **Low measured
    acceptance on the Spark is far more likely to be a gap than an equation** —
-   read that counter before touching the math.
-
-   One gap is EXPECTED and is not a bug: on a cold turn the prefill fills the
-   ring with prompt positions `0..P-1`, and the first propose drafts from
-   position `P` — whose capture only exists after the next target step. The
-   reference has the same shape (`forward_spec(..., 0)` fills the ring and
-   returns without drafting; its first real spec pass follows a decode). Expect
-   `gap: 1` once per sequence, and nothing after that.
+   read that counter before touching the math. On the served path the counter
+   should stay at 0; a non-zero value names a scheduler seam, not the block.
 
 ### 7.6 First run
 
 ```bash
-spark serve --model <vision-exp snapshot> --speculative             --max-batch-size 1 --max-seq-len 2048 --swap-space-gb 0
+spark serve --model <vision-exp snapshot> --speculative \
+    --max-batch-size 1 --max-seq-len 2048 --swap-space-gb 0
 ```
 
 Expect these lines, in this order, before the first token:

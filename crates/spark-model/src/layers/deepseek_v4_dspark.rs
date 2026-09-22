@@ -16,7 +16,7 @@
 //!             catch-up    ring[s][pos % W] = rope(kv_norm(wkv_s(main_x)))
 //!
 //!             block       x = hc_expand(embed([last, noise×4]))
-//!             stage s     hc_pre → attn_norm → MLA(q@pos+1..pos+γ, K=[ring‖block])
+//!             stage s     hc_pre → attn_norm → MLA(q@pos..pos+γ-1, K=[ring‖block])
 //!                         → hc_post → hc_pre → ffn_norm → MoE → hc_post
 //!
 //!             head        x = hc_head(h);  logits = lm_head(norm(x))
@@ -69,9 +69,13 @@ pub mod ring;
 pub mod stage;
 
 #[cfg(test)]
+mod ring_contract_tests;
+#[cfg(test)]
 mod tests;
 
-pub use capture::{band_row, launch_hc_mean_capture, row_stride_elems, slot_offset_elems};
+pub use capture::{
+    band_row, launch_hc_mean_capture, row_stride_elems, rows_through, slot_offset_elems,
+};
 pub use markov_confidence::{ChainOut, MarkovChainRef};
 
 /// The largest γ this head will ever be asked for. The checkpoint's trained
@@ -98,12 +102,18 @@ pub struct DsparkProposerState {
     pub stage_ring: [DevicePtr; DSPARK_STAGES],
     /// `min(window, next_pos)`.
     pub ring_len: usize,
-    /// First sequence position whose ring entry is missing.
+    /// First sequence position whose ring entry is missing. Equals the
+    /// propose's `position` (the first UNPROCESSED position) once the ring is
+    /// current — see `ring.rs`.
     pub next_pos: usize,
-    /// Drafts returned by the last `propose` (bookkeeping only — the ring is
-    /// position-indexed and is rewritten from committed captures, so
-    /// `after_verify` has nothing to trim).
-    pub last_num_drafted: usize,
+    /// How many band rows hold the newest committed positions, oldest first:
+    /// `rows_through(last_mtp_hidden_idx)`, set by the MODEL
+    /// (`TransformerModel::dspark_note_committed_rows`) right before every
+    /// propose, because the model is what knows whether the last target step
+    /// was a serial decode (1 row) or a verify (`num_accepted + 1` rows).
+    /// `after_verify` deliberately does not touch it: it never sees the serial
+    /// decodes, and two writers would be two sources.
+    pub committed_rows: usize,
     /// Positions that were owed but had no capture row left to rebuild them.
     /// Diagnostic: low acceptance on the Spark is most likely THIS, not the
     /// equations.

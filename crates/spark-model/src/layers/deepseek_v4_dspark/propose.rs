@@ -167,13 +167,9 @@ impl DeepseekV4DsparkHead {
         stream: u64,
     ) -> Result<()> {
         let row_bytes = self.n_targets * self.hidden * 2;
-        let mut done = 0usize;
-        while done < count {
-            let pos = first_pos + done;
-            let slot = ring::slot(pos, self.window);
-            let run = (count - done).min(self.window - slot);
+        for (pos, slot, run) in ring::runs(first_pos, count, self.window) {
             self.ingest_run(
-                base.offset((src_row + done) * row_bytes),
+                base.offset((src_row + pos - first_pos) * row_bytes),
                 run,
                 pos,
                 slot,
@@ -181,13 +177,13 @@ impl DeepseekV4DsparkHead {
                 ctx,
                 stream,
             )?;
-            done += run;
         }
         Ok(())
     }
 
-    /// Bring every stage ring up to `position`, from the prefill ring on the
-    /// first propose and from the model's capture band afterwards.
+    /// Bring every stage ring up to — excluding — `position`, the first
+    /// unprocessed position: from the prefill ring on the first propose and
+    /// from the model's capture band afterwards.
     #[allow(clippy::too_many_arguments)]
     fn refresh_rings(
         &self,
@@ -256,7 +252,7 @@ impl DeepseekV4DsparkHead {
                 stream,
             )?;
         }
-        state.next_pos = state.next_pos.max(position + 1);
+        state.next_pos = ring::after_propose(state.next_pos, position);
         state.ring_len = ring::ring_len(state.next_pos, self.window);
         Ok(())
     }
@@ -278,7 +274,7 @@ impl DraftProposer for DeepseekV4DsparkHead {
             stage_ring,
             ring_len: 0,
             next_pos: 0,
-            last_num_drafted: 0,
+            committed_rows: 0,
             gap_positions: 0,
         }))
     }
@@ -374,10 +370,11 @@ impl DraftProposer for DeepseekV4DsparkHead {
         };
 
         // ── ring catch-up ──
-        // `committed` is what the last verify left in the band: the accepted
-        // prefix plus the bonus token, i.e. `num_accepted + 1`, which
-        // `after_verify` recorded.
-        let committed = st.last_num_drafted;
+        // `committed` is how many band rows the last target step left holding
+        // committed positions (band law, `capture.rs`): 1 after a serial
+        // decode, `num_accepted + 1` after a verify. The model set it from
+        // the row the scheduler pointed `save_hidden_for_mtp` at.
+        let committed = st.committed_rows;
         self.refresh_rings(st, position, committed, target_hidden_stack, ctx, stream)?;
         let ring_len = st.ring_len;
         let rings = st.stage_ring;
@@ -430,19 +427,21 @@ impl DraftProposer for DeepseekV4DsparkHead {
     }
 
     /// Nothing to trim: the ring is POSITION-indexed and every entry is
-    /// rewritten from a committed capture on the next propose. What is
-    /// recorded is how many capture rows that next propose may read.
+    /// rewritten from a committed capture on the next propose. Nor is the
+    /// committed-row count recorded here — a serial decode never calls this,
+    /// so the model sets `committed_rows` before every propose instead
+    /// (`DsparkProposerState::committed_rows`). The downcast is kept so a
+    /// foreign state is still an error rather than a silent no-op.
     fn after_verify(
         &self,
-        num_accepted: usize,
+        _num_accepted: usize,
         state: &mut dyn ProposerState,
         _stream: u64,
     ) -> Result<()> {
-        let st = state
+        state
             .as_any_mut()
             .downcast_mut::<DsparkProposerState>()
             .ok_or_else(|| anyhow::anyhow!("Invalid DSpark proposer state"))?;
-        st.last_num_drafted = num_accepted + 1;
         Ok(())
     }
 
