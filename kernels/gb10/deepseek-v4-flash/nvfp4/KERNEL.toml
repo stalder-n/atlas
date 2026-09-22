@@ -85,6 +85,13 @@ prefill_attn_compressed_vis = "prefill_attn_compressed_vis"
 # by ~30 targets and is never edited for one model; re-derive if common/ moves.
 moe_router_vl = "moe_router_vl"
 
+# ── Native DSpark (3-stage speculative block drafter) ──────────────────────
+# The unweighted mean over the mHC streams that `Transformer.forward` takes at
+# `dspark_target_layer_ids`. Stem-identity, spelled out like the four above.
+# REQUIRED (no fallback): absence must fail the boot audit, so it gets no
+# `[expected_absent]` entry in MODEL.toml.
+dspark_capture = "dspark_capture"
+
 # The fused silu_mul_quant_fp8 entry point is deliberately absent from this
 # swiglu_limit shadow of moe_silu_mul.cu: the launch site checks the kernel
 # handle and falls back to the unfused silu_mul → per_token_group_quant_fp8

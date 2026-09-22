@@ -154,6 +154,14 @@ fn loaded_scale_kind(
     Ok(WeightQuantFormat::Nvfp4)
 }
 
+/// [`assemble_layer_concrete`], boxed as a [`TransformerLayer`].
+///
+/// The two existing call sites (`load_layers.rs`, `mtp.rs`) want the trait
+/// object; the native-DSpark loader wants the CONCRETE type, because its three
+/// stages are driven field-by-field (`mla`, `hc`, `ffn`) rather than through
+/// `decode()`/`prefill()` — neither of which can express γ mutually-visible
+/// queries over a ring of MAIN-MODEL KV with no paged cache. See
+/// `layers/deepseek_v4_dspark/`.
 #[allow(clippy::too_many_arguments)]
 pub fn assemble_layer(
     layer_idx: usize,
@@ -189,6 +197,72 @@ pub fn assemble_layer(
     gpu: &dyn GpuBackend,
     layer_kv_dtypes: &[KvCacheDtype],
 ) -> Result<Box<dyn TransformerLayer>> {
+    Ok(Box::new(assemble_layer_concrete(
+        layer_idx,
+        layer_prefix,
+        force_all_experts,
+        input_norm,
+        post_attn_norm,
+        wq_a,
+        wq_a_nvfp4,
+        wq_b,
+        wq_b_nvfp4,
+        q_a_norm,
+        wkv_a,
+        wkv_a_nvfp4,
+        wkv_b,
+        kv_a_norm,
+        o_dense,
+        o_nvfp4,
+        w_uk_t,
+        w_uv,
+        wq_b_rope,
+        w_qk_absorbed,
+        w_uk_block_diag,
+        w_uv_block_diag,
+        yarn_inv_freq,
+        wo_a,
+        hc_head,
+        store,
+        config,
+        gpu,
+        layer_kv_dtypes,
+    )?))
+}
+
+/// Build one DeepSeek-V4 block body as the CONCRETE [`Qwen3AttentionLayer`].
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_layer_concrete(
+    layer_idx: usize,
+    layer_prefix: &str,
+    force_all_experts: bool,
+    input_norm: DenseWeight,
+    post_attn_norm: DenseWeight,
+    wq_a: DenseWeight,
+    wq_a_nvfp4: Option<QuantizedWeight>,
+    wq_b: DenseWeight,
+    wq_b_nvfp4: Option<QuantizedWeight>,
+    q_a_norm: DenseWeight,
+    wkv_a: DenseWeight,
+    wkv_a_nvfp4: Option<QuantizedWeight>,
+    wkv_b: DenseWeight,
+    kv_a_norm: DenseWeight,
+    o_dense: DenseWeight,
+    o_nvfp4: Option<QuantizedWeight>,
+    w_uk_t: DenseWeight,
+    w_uv: DenseWeight,
+    wq_b_rope: DenseWeight,
+    w_qk_absorbed: DenseWeight,
+    w_uk_block_diag: DenseWeight,
+    w_uv_block_diag: DenseWeight,
+    yarn_inv_freq: DevicePtr,
+    wo_a: DenseWeight,
+    hc_head: Option<HcHeadWeights>,
+    store: &WeightStore,
+    config: &ModelConfig,
+    gpu: &dyn GpuBackend,
+    layer_kv_dtypes: &[KvCacheDtype],
+) -> Result<Qwen3AttentionLayer> {
     // RedHatAI re-quant uses flattened naming: layers.N.* instead of model.layers.N.*
     // `layer_prefix` is the tensor-name prefix for this block: `layers.{idx}` for
     // main layers, or `mtp.0` for the MTP draft module (which reuses this exact
@@ -577,7 +651,7 @@ pub fn assemble_layer(
         config.hc_mult
     );
 
-    Ok(Box::new(layer))
+    Ok(layer)
 }
 
 /// Load one HC site (`attn` or `ffn`) for a block as float32 device buffers.

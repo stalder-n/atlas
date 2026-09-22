@@ -567,6 +567,14 @@ impl TransformerModel {
                 // it actually verifies — but the drafter KV this writes must stay in lockstep,
                 // which it does because both ranks consume identical `(last_token, position)`
                 // and identical target hiddens (the target forward is already collective-correct).
+                //
+                // 🔴 This lane now also serves DeepSeek-V4 native DSpark, whose three stages are
+                // EP-SHARDED (`force_all_experts = false`) rather than replicated. Nothing here
+                // changes — `needs_comm()` already selects it — but the corollary lives in
+                // `impl_b3_dspark.rs`: the DSpark capture branch must NOT take the DFlash rank-0
+                // early return, or this worker proposes from a stale capture and the two ranks
+                // all-reduce partials of different inputs. `save_hidden_for_mtp` below is
+                // harmless for DSpark (it ignores `target_hidden` and reads the capture band).
                 let last_token = self.ep_broadcast_u32(0)?;
                 let position = self.ep_broadcast_u32(0)? as usize;
                 let num_drafts = self.ep_broadcast_u32(0)? as usize;

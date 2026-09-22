@@ -908,6 +908,9 @@ impl Model for TransformerModel {
     fn ep_broadcast_tokens(&self, tokens: &[u32]) -> Result<Vec<u32>> {
         self.ep_broadcast_tokens_dispatch(tokens)
     }
+    fn ep_broadcast_vision_stage(&self, tokens: &[u32]) -> Result<()> {
+        self.ep_send_vision_stage(tokens)
+    }
     fn default_stream(&self) -> u64 {
         self.default_stream_dispatch()
     }

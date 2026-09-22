@@ -8,6 +8,8 @@ use spark_runtime::weights::{WeightDtype, WeightStore, WeightTensor};
 
 use super::{discover_dspark_stages, expect_tensor, native_dspark_config};
 
+mod dspark;
+
 fn store(entries: &[(&str, WeightDtype, &[usize])]) -> WeightStore {
     let weights = entries
         .iter()
@@ -136,7 +138,7 @@ fn pure_tp_draft_contract_rejects_invalid_or_overflowing_geometry() {
 
 fn pinned_store() -> WeightStore {
     let headers: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/0731-tensor-headers.json")).unwrap();
+        serde_json::from_str(include_str!("../fixtures/0731-tensor-headers.json")).unwrap();
     WeightStore::from_map(
         headers
             .as_object()
@@ -190,7 +192,7 @@ fn pinned_base_and_draft_have_independent_quant_contracts() {
 #[test]
 fn pinned_config_ep_partition_is_128_experts_per_rank() {
     let mut config =
-        avarok_core::config::parse_config(include_str!("fixtures/0731-config.json")).unwrap();
+        avarok_core::config::parse_config(include_str!("../fixtures/0731-config.json")).unwrap();
     assert_eq!(config.num_hidden_layers, 43);
     assert_eq!(config.dspark_target_layer_ids, [40, 41, 42]);
     assert_eq!(
@@ -238,15 +240,23 @@ fn malformed_nvfp4_contracts_fail_closed() {
     );
 }
 
+/// `--speculative` no longer refuses outright (U3.1 landed the proposer), but
+/// the TARGET contract still runs first: an empty store fails on the target
+/// experts, never silently.
 #[test]
-fn dspark_request_is_explicitly_unsupported_before_tensor_validation() {
+fn dspark_request_still_validates_the_target_contract_first() {
     let mut config = ModelConfig::qwen3_next_80b_nvfp4();
     config.model_type = "deepseek_v4".into();
     config.dspark_block_size = 5;
     let err = super::check_native_dspark_checkpoint(&store(&[]), &config, true).unwrap_err();
+    let msg = err.to_string();
     assert!(
-        err.to_string()
-            .contains("native DSpark proposer is not implemented")
+        !msg.contains("not implemented"),
+        "the DSpark refusal must be gone, got: {msg}"
+    );
+    assert!(
+        msg.contains("missing"),
+        "an empty store must fail the target tensor contract, got: {msg}"
     );
 }
 

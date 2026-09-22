@@ -32,6 +32,11 @@ const VISION_SOURCES: &[(&str, &str)] = &[
     ("moe_router_vl.cu", "moe_router_vl"),
 ];
 
+/// (file, module) of every source the native DSpark proposer requires. Same
+/// posture as [`VISION_SOURCES`]: no fallback exists, so absence is a boot
+/// failure and MODEL.toml gets no `[expected_absent]` entry for it.
+const DSPARK_SOURCES: &[(&str, &str)] = &[("dspark_capture.cu", "dspark_capture")];
+
 /// (kernel, parameter count), re-derived from the `.cu` sources by
 /// [`global_signatures`] and asserted against these numbers.
 ///
@@ -61,6 +66,8 @@ const VISION_ARITY_PINS: &[(&str, usize)] = &[
     ("prefill_attn_compressed_vis", 16),
     ("moe_topk_sqrtsoftplus_batched_vl", 11),
     ("moe_hash_route_batched_vl", 11),
+    // The mHC-stream mean the DSpark capture band is built from.
+    ("dspark_hc_mean_capture", 8),
 ];
 
 fn kernels_dir() -> PathBuf {
@@ -168,7 +175,7 @@ fn v4_optional_probes_have_runtime_audit_declarations() {
 #[test]
 fn v4_vision_kernel_arities_match_the_pins() {
     let mut seen = Vec::new();
-    for &(file, _) in VISION_SOURCES {
+    for &(file, _) in VISION_SOURCES.iter().chain(DSPARK_SOURCES) {
         let path = v4_nvfp4_dir().join(file);
         let src =
             std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
@@ -200,7 +207,7 @@ fn v4_vision_modules_are_registered() {
         .get("modules")
         .and_then(toml::Value::as_table)
         .expect("nvfp4/KERNEL.toml must carry a [modules] table");
-    for &(file, module) in VISION_SOURCES {
+    for &(file, module) in VISION_SOURCES.iter().chain(DSPARK_SOURCES) {
         let stem = file.strip_suffix(".cu").expect("source must be a .cu");
         let declared = modules
             .get(stem)
@@ -272,7 +279,7 @@ fn compiled_v4_registry_carries_the_vision_modules() {
         .collect();
     assert!(!targets.is_empty(), "build must include deepseek-v4-flash");
     for target in targets {
-        for &(_, module) in VISION_SOURCES {
+        for &(_, module) in VISION_SOURCES.iter().chain(DSPARK_SOURCES) {
             assert!(
                 target.modules.iter().any(|(name, _)| *name == module),
                 "compiled deepseek-v4-flash target is missing required module {module}"

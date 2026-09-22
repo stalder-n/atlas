@@ -124,3 +124,63 @@ impl TransformerModel {
         self.layers.iter().any(|l| l.uses_local_mla_prefill())
     }
 }
+
+impl TransformerModel {
+    /// Install the native-DSpark target-capture band.
+    ///
+    /// Called post-construction by the factory, once `load_v4_dspark_module`
+    /// has confirmed the checkpoint really ships `mtp.{0,1,2}` and
+    /// `DeepseekV4DsparkHead::new` has resolved `dspark_hc_mean_capture`.
+    /// Doing it here rather than in `new()` keeps a legacy single-module-MTP
+    /// checkpoint — which declares the same `dspark_block_size` — from being
+    /// handed a band nothing ever writes.
+    ///
+    /// `kgamma` is the verify width (`num_drafts + 1`); the band is
+    /// `kgamma * max_batch_size` rows of `n_targets * hidden` BF16, the same
+    /// band law `dflash_hidden_save` uses. At K=4, batch 8, 3 targets and
+    /// hidden 4096 that is ~1.6 MB.
+    pub fn install_dspark_capture(
+        &mut self,
+        capture_layers: Vec<usize>,
+        kgamma: usize,
+        max_batch_size: usize,
+        kernel: spark_runtime::gpu::KernelHandle,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !capture_layers.is_empty(),
+            "DSpark capture needs `dspark_target_layer_ids`; an empty list would leave \
+             `main_proj`'s input uninitialised"
+        );
+        anyhow::ensure!(
+            kgamma > 0,
+            "DSpark capture band needs a non-zero verify width"
+        );
+        anyhow::ensure!(
+            kernel.0 != 0,
+            "DSpark capture kernel did not resolve; there is no fallback"
+        );
+        for &layer in &capture_layers {
+            anyhow::ensure!(
+                layer < self.config.num_hidden_layers,
+                "DSpark target layer {layer} is outside 0..{}",
+                self.config.num_hidden_layers
+            );
+        }
+        let rows = kgamma * max_batch_size.max(1);
+        let bytes = rows * capture_layers.len() * self.config.hidden_size * 2;
+        self.dspark_capture = Some(self.gpu.alloc(bytes)?);
+        self.dspark_capture_rows = rows;
+        self.dspark_kgamma = kgamma;
+        self.dspark_capture_layers = capture_layers;
+        self.dspark_capture_k = kernel;
+        tracing::info!(
+            "DSpark target capture installed: layers {:?}, {rows} rows x {} targets x {} hidden \
+             ({:.2} MB)",
+            self.dspark_capture_layers,
+            self.dspark_capture_layers.len(),
+            self.config.hidden_size,
+            bytes as f64 / (1024.0 * 1024.0),
+        );
+        Ok(())
+    }
+}

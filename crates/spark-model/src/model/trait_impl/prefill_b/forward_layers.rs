@@ -123,6 +123,11 @@ impl TransformerModel {
             // Hash-MoE: this chunk's token IDs (uploaded in prefill_b_embed_chunk
             // to the stable buffer, in chunk order matching the MoE loop).
             token_ids: Some(self.buffers.token_ids()),
+            // Chunked prefill: image prompts are rejected before they reach a
+            // chunked pass, and `ImageWindow::for_chunk` refuses a non-zero
+            // chunk start (its bounds are chunk-LOCAL indices), so a sentinel
+            // span can never legitimately arrive here.
+            image_window: None,
             host_token_ids: None,
             // #30: request slot pairs (None unless routing to a non-active slot).
             routed_lora_layers: self.routed_slot_layers(seq.adapter_slot),

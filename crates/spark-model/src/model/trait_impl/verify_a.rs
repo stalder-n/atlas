@@ -171,6 +171,7 @@ impl TransformerModel {
                         gdn_exact_replay: false,
                         gdn_write_on_accept: false,
                         token_ids: None,
+                        image_window: None,
                         host_token_ids: None,
                         routed_lora_layers: None, // #30: verify decode; no prefill route.
                         midchunk_capture: None,
@@ -211,6 +212,7 @@ impl TransformerModel {
                     gdn_exact_replay: false,
                     gdn_write_on_accept: false,
                     token_ids: None,
+                    image_window: None,
                     host_token_ids: None,
                     routed_lora_layers: None, // #30: verify decode; no prefill route.
                     midchunk_capture: None,
@@ -397,6 +399,7 @@ impl TransformerModel {
                 gdn_write_on_accept: false,
                 token_ids: None,
                 hc_row_offset: 0,
+                image_window: None,
                 host_token_ids: None,
                 routed_lora_layers: None,
                 midchunk_capture: None,

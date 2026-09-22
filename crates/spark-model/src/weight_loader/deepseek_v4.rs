@@ -10,9 +10,12 @@ mod attn_sink;
 mod compute;
 mod csa_ape;
 mod load_layers;
+// Native 3-stage DSpark draft-module loader for the 0731 / Vision-Exp family.
+mod dspark;
 // MTP draft-module loader for nvidia/DeepSeek-V4-Flash-NVFP4.
 mod mtp;
 mod vision;
+pub(crate) use dspark::{DSPARK_STAGES, DeepseekV4DsparkWeights, load_v4_dspark_module};
 pub(crate) use mtp::{DeepseekV4MtpModule, load_v4_mtp_module};
 
 use anyhow::{Context, Result};

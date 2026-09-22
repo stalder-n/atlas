@@ -286,6 +286,17 @@ pub fn run(
     } else {
         0
     };
+    // Block drafters (DFlash, native DSpark) resolve γ from the checkpoint and
+    // are driven at `num_drafts = K - 1`, so say which one is running and at
+    // what width — a DSpark serve clamped to 3 against a trained γ of 5 is a
+    // deliberate limit (`serve_load.rs`), not a misconfiguration, and the log
+    // is the only place that distinction is visible at runtime.
+    if use_mtp && let Some(gamma) = model.dflash_gamma() {
+        tracing::info!(
+            "Block drafter active: trained γ={gamma}, driven at num_drafts={num_drafts}              (verify K={})",
+            num_drafts + 1,
+        );
+    }
     let chunked = max_prefill_tokens > 0;
     // Throughput-aware MTP gate: when MTP is requested, measure the verify-step
     // cost multiplier over the first decode steps of the first lone-sequence

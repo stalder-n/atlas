@@ -92,6 +92,10 @@ const PINS: &[(&str, &str, usize)] = &[
     // `(bias_vl, vocab_size)` respectively.
     ("moe_router_vl", "moe_topk_sqrtsoftplus_batched_vl", 11),
     ("moe_router_vl", "moe_hash_route_batched_vl", 11),
+    // ── Native DSpark target capture (deepseek-v4-flash only) ───────────────
+    // (streams, dst, rows, hidden, hc_mult, src_row0, dst_row_stride_elems,
+    //  dst_slot_off_elems)
+    ("dspark_capture", "dspark_hc_mean_capture", 8),
 ];
 
 /// Targets whose copy of a kernel legitimately differs in arity from the

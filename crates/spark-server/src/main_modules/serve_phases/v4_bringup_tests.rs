@@ -52,6 +52,29 @@ fn unsafe_execution_modes_are_refused() {
     }
 }
 
+/// `--speculative` is the ONE speculation mode a native-DSpark checkpoint
+/// admits; the other three stay refused there too.
+#[test]
+fn native_dspark_admits_only_the_block_drafter() {
+    let mut dspark = config();
+    dspark.dspark_block_size = 5;
+    let mut spec = args();
+    spec.speculative = true;
+    assert!(validate_v4_bringup(&spec, &dspark).is_ok());
+    for mutate in [
+        (|a: &mut ServeArgs| a.self_speculative = true) as fn(&mut ServeArgs),
+        |a: &mut ServeArgs| a.ngram_speculative = true,
+        |a: &mut ServeArgs| a.dflash = true,
+    ] {
+        let mut other = args();
+        other.speculative = true;
+        mutate(&mut other);
+        assert!(validate_v4_bringup(&other, &dspark).is_err());
+    }
+    // A checkpoint WITHOUT native stages keeps the refusal.
+    assert!(validate_v4_bringup(&spec, &config()).is_err());
+}
+
 #[test]
 fn chunk_continuation_is_refused() {
     assert!(validate_v4_prefill_budget(&config(), 2048, 2048).is_ok());

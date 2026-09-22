@@ -10,11 +10,12 @@ two-node EP=2 procedure (checkouts, `HF_HOME` mounts, image build and transfer,
 and is not repeated here. This one covers only what the Vision-Exp checkpoints
 change. Branch: `impl/deepseek-v4-flash-vision-exp`.
 
-**No CUDA kernel on this branch has ever been compiled.** The four kernels added
+**No CUDA kernel on this branch has ever been compiled.** The five kernels added
 for this work — `vision_encoder` (a same-hardware symlink of the Qwen ViT
 source), `vision_deepseek` (3×3 pixel unshuffle, exact-erf GELU, unclamped
-SwiGLU split), `prefill_attn_compressed_vis` (image-span key bounds) and
-`moe_router_vl` (per-modality routing bias) under
+SwiGLU split), `prefill_attn_compressed_vis` (image-span key bounds),
+`moe_router_vl` (per-modality routing bias) and `dspark_capture` (the mHC-stream
+mean the DSpark drafter is fed) under
 `kernels/gb10/deepseek-v4-flash/nvfp4/`, plus their hopper/b200 mirror symlinks —
 are blind code. The tests that would catch a wrong launch signature read the PTX
 baked into the binary, so they are `#[ignore]` **and vacuous on a stub build**:
@@ -272,15 +273,136 @@ both: OpenAI `/v1/chat/completions` (single image, multi-image, an image inside 
 
 ## 7. Native DSpark (Phase 3)
 
-Not implemented, and refused in two places: the `!use_speculative` check in
-`crates/spark-model/src/preflight/deepseek_v4.rs`, and `validate_v4_bringup` in
-`crates/spark-server/src/main_modules/serve_phases/v4_bringup.rs`. Both guards
-must be lifted before DSpark can be validated at all — a speculation flag today
-is a startup error, not a slow path.
+**Implemented, never executed.** Both startup refusals are lifted — the
+`!use_speculative` bail in `crates/spark-model/src/preflight/deepseek_v4.rs`
+and the `args.speculative` clause of `validate_v4_bringup` in
+`crates/spark-server/src/main_modules/serve_phases/v4_bringup.rs`, the latter
+only for a checkpoint that declares `dspark_block_size > 0`. Every other
+speculation mode (`--self-speculative`, `--ngram-speculative`, `--dflash`)
+stays refused on V4.
 
-When the 3-stage chain lands, its acceptance numbers, its measured speedup (via
-the measurement and certification oracles, never by eye) and the greedy-chain
-deviation belong in this section.
+### 7.1 What runs
+
+```
+target step   layers 40/41/42 → mean over the mHC streams → capture band
+                                (dspark_capture.cu :: dspark_hc_mean_capture)
+propose()     ring catch-up : main_x = main_norm(main_proj(capture))
+                              ring[s][pos % 128] = rope(kv_norm(wkv_s(main_x)))
+              block         : x = hc_expand(embed([last_token, noise × 4]))
+              stage s=0,1,2 : hc_pre → attn_norm → MLA(q@pos+1..pos+5,
+                                K = [valid ring ‖ block KV], bidirectional)
+                              → hc_post → hc_pre → ffn_norm → MoE → hc_post
+              head          : x = hc_head(h); logits = lm_head(norm(x))
+                              greedy Markov chain → 5 drafts
+                              confidence = conf_w · [x_i ; markov_embed_i]
+```
+
+Files: `crates/spark-model/src/layers/deepseek_v4_dspark{.rs,/}`,
+`crates/spark-model/src/weight_loader/deepseek_v4/dspark.rs`,
+`crates/spark-model/src/model/impl_b3_dspark.rs`,
+`kernels/gb10/deepseek-v4-flash/nvfp4/dspark_capture.cu` (+ hopper/b200
+symlinks).
+
+### 7.2 Served at K=4, not K=6
+
+The checkpoint's trained block size is **5**; Atlas serves **`num_drafts = 3`**
+(verify K=4) and `serve_load.rs` clamps anything higher with a warning.
+`scheduler/mtp_step.rs` routes `drafts.len() >= 4` to `step_verify_dflash`,
+whose model hooks (`dflash_accept_append`, `dflash_eagle_accept_append`,
+`dflash_eagle_kgamma_append`) hard-error on any state that is not a
+`DflashProposerState`. 3 is also vLLM's measured optimum for this checkpoint,
+so the clamp costs nothing today; raising it means teaching that verify ladder
+about DSpark, which is a separate unit.
+
+### 7.3 Acceptance expectation, and what it is NOT
+
+vLLM measures **2.99 accepted tokens per forward at K=3** on this checkpoint.
+That is the number to compare against — and it is *necessary, not sufficient*:
+
+* `MoeLayer::forward_prefill` at 5 rows falls below the grouped-GEMM threshold
+  (64) into `forward_batched`, which re-streams the expert weights per token.
+  **Three stages × 5 rows × 256 experts of routing per propose may make DSpark
+  net-negative on throughput even at the expected acceptance.** Measure wall
+  time, not acceptance, before believing anything — and measure it through
+  `/measurement-discipline` and the certification oracle, never by eye.
+* Loading three full V4 stages adds roughly **10 GB replicated / 5 GB per rank
+  under EP=2** (the stages are EP-sharded, `force_all_experts = false`, and are
+  loaded on BOTH ranks because the propose all-reduces). If the profile is
+  already near the memory ceiling, `--speculative` may simply not fit.
+
+### 7.4 Deviations from the reference, all deliberate
+
+| # | Reference | Atlas | Why |
+|---|---|---|---|
+| 1 | `sample(logits, temperature)` per chain row | greedy `argmax` | probabilistic draft sampling is out of scope; a greedy chain only costs acceptance, never correctness — every draft is re-verified |
+| 2 | `act_quant(kv[..., :-rd], 64, …, inplace=True)` — the KV latent round-trips through FP8 | BF16 ring | Atlas's ring is BF16; the golden generator monkeypatches `act_quant` to identity and records it |
+| 3 | keys `[ring[0..min(win,pos+1)) ‖ ring[win .. win+γ)]` | block KV written at index `ring_len` so the key range is ONE interval | `prefill_attn_compressed_vis` takes one inclusive `[lo,hi]` per query; softmax over keys is permutation-invariant and RoPE is applied at write time |
+| 4 | confidence in f32 end to end | the two half-dots are BF16 GEMVs, summed in f32 on the host | only affects the `AVAROK_MTP_DRAFT_CONF` gate, which is staged off |
+
+### 7.5 What is verified here, and what the Spark must verify
+
+Host-verified (`cargo test -p spark-model deepseek_v4_dspark`,
+`preflight::deepseek_v4`):
+
+* stage discovery and the quant contract on BOTH packings, from
+  `preflight/deepseek_v4/fixtures/vision-exp-tensor-headers.json`;
+* ring index algebra — slot, length, the wrap, the prefill `cutoff` split, the
+  block-KV placement, catch-up row selection and gap reporting;
+* capture-band addressing;
+* **the greedy Markov chain and the confidence dot against DeepSeek's own
+  `forward_spec` outputs** (`layers/deepseek_v4_dspark/fixtures/dspark_tiny_golden.json`,
+  generated by `gen_dspark_tiny_golden.py` from the reference at the pinned
+  revision), fed the golden's own `x` and pre-Markov logits so the stage bodies
+  are out of the picture;
+* the inert-when-disabled guard.
+
+NOT verified anywhere on this host, in descending order of risk:
+
+1. **The 3-stage numeric path.** mHC → MLA-over-a-ring → 256-expert MoE, three
+   times, written blind. The golden emits per-stage `attn_out` and `h_out`
+   captures so a Spark-side compare can bisect to a stage; the ladder is
+   `main_x` → `stage0.attn_out` → `stage0.h_out` → … → `x_pre_norm` →
+   `logits_pre_markov`.
+2. **`prefill_attn_compressed_vis`.** Written blind in Phase 1 and still never
+   executed. DSpark is its second caller, with a materially different shape
+   (5 queries, ring_len+5 keys, `n_comp = 0`, `ratio = 1`, padding rows with an
+   empty key range). If it has a bug, Phase 2 and Phase 3 fail together.
+3. **`dspark_capture.cu`.** New, never compiled.
+4. **The EP=2 lane.** Both ranks must run the propose; the capture branch in
+   `impl_b3_dspark.rs` deliberately has NO rank-0 early return. Never exercised.
+5. **Ring/scheduler lockstep.** Any path that advances a sequence without a
+   propose (serial-decode bootstrap, adaptive-speculation suspend,
+   preemption/resume, a prefix-cache warm turn) leaves a ring gap. The design
+   degrades rather than corrupts, and counts the gap:
+   `RUST_LOG=spark_model=debug` prints `DSpark ring gap: …`. **Low measured
+   acceptance on the Spark is far more likely to be a gap than an equation** —
+   read that counter before touching the math.
+
+   One gap is EXPECTED and is not a bug: on a cold turn the prefill fills the
+   ring with prompt positions `0..P-1`, and the first propose drafts from
+   position `P` — whose capture only exists after the next target step. The
+   reference has the same shape (`forward_spec(..., 0)` fills the ring and
+   returns without drafting; its first real spec pass follows a decode). Expect
+   `gap: 1` once per sequence, and nothing after that.
+
+### 7.6 First run
+
+```bash
+spark serve --model <vision-exp snapshot> --speculative             --max-batch-size 1 --max-seq-len 2048 --swap-space-gb 0
+```
+
+Expect these lines, in this order, before the first token:
+
+```
+DeepSeek-V4 native DSpark: 3 stages validated, block_size=5, …
+DeepSeek-V4 native DSpark module loaded: 3 stages (MLA + mHC + MoE), EP rank …
+DSpark target capture installed: layers [40, 41, 42], … rows …
+DeepSeek-V4 native DSpark speculative decoding: ENABLED (3 stages, block_size=5, num_drafts=3)
+Block drafter active: trained γ=5, driven at num_drafts=3 (verify K=4)
+```
+
+A missing `dspark_capture` module fails the boot audit by design (no
+`[expected_absent]` entry) — that is the first thing to check if boot stops.
 
 ---
 

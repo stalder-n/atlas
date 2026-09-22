@@ -3,6 +3,7 @@
 pub mod attn_v41;
 pub mod deepseek_v41_layer;
 pub mod deepseek_v41_ref;
+pub mod deepseek_v4_dspark;
 pub mod deepseek_v4_mtp;
 pub mod dense_ffn;
 pub mod dflash_head;
@@ -76,6 +77,7 @@ pub(crate) fn w4a16_k64_min_k() -> u32 {
     })
 }
 
+pub use deepseek_v4_dspark::{DeepseekV4DsparkHead, DsparkProposerState};
 pub use deepseek_v4_mtp::{DeepseekV4MtpHead, DeepseekV4MtpProposerState};
 pub use dense_ffn::{DenseFfnLayer, DenseFfnWeights, FfnActivation};
 pub use dflash_head::{

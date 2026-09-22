@@ -24,12 +24,6 @@ pub(super) fn check_native_dspark_checkpoint(
         config.hidden_size.is_multiple_of(128) && config.moe_intermediate_size.is_multiple_of(128),
         "DeepSeek-V4 native quant contract requires hidden and MoE dimensions divisible by 128"
     );
-    ensure!(
-        !use_speculative,
-        "DeepSeek-V4 native DSpark proposer is not implemented; disable speculation. \
-         Legacy V4 MTP is a different architecture."
-    );
-
     check_target_quant_contract(store, config)?;
     let (local_start, local_end) = config.local_expert_range();
     let local_experts = local_end - local_start;
@@ -46,7 +40,43 @@ pub(super) fn check_native_dspark_checkpoint(
         config.num_hidden_layers * ATTN_PROJECTIONS.len(),
     );
 
-    tracing::info!("DeepSeek-V4 speculation is off; skipping independent DSpark draft tensors");
+    if !use_speculative {
+        tracing::info!("DeepSeek-V4 speculation is off; skipping independent DSpark draft tensors");
+        return Ok(());
+    }
+
+    // Two disjoint checkpoint families answer to `dspark_block_size > 0`:
+    //
+    //   * NATIVE DSpark (0731 / Vision-Exp) ships `mtp.{0,1,2}.*` with
+    //     `mtp.0.main_proj.weight` — the three-stage block drafter this
+    //     contract validates.
+    //   * LEGACY single-module MTP (`nvidia/DeepSeek-V4-Flash-NVFP4`) ships
+    //     `mtp.0.enorm` and no `main_proj`. It is a different architecture,
+    //     bound by `load_v4_mtp_module`, and must NOT be held to the DSpark
+    //     stage contract.
+    //
+    // `main_proj` is the cheapest discriminator; `load_v4_dspark_module` gates
+    // on the same tensor, so preflight and loader cannot disagree.
+    if !store.contains("mtp.0.main_proj.weight") {
+        tracing::info!(
+            "DeepSeek-V4: `--speculative` with no native DSpark stages \
+             (`mtp.0.main_proj.weight` absent) — the legacy single-module MTP path binds \
+             instead; skipping the DSpark stage contract"
+        );
+        return Ok(());
+    }
+
+    check_dspark_quant_contract(store, config)?;
+    tracing::info!(
+        "DeepSeek-V4 native DSpark: 3 stages validated, block_size={}, noise_token={}, \
+         target_layers={:?}, markov_rank={} — proposer will load ~3 extra V4 bodies \
+         (routed experts EP-sharded across {} rank(s))",
+        config.dspark_block_size,
+        config.dspark_noise_token_id,
+        config.dspark_target_layer_ids,
+        config.dspark_markov_rank,
+        config.ep_world_size.max(1),
+    );
     Ok(())
 }
 
@@ -67,10 +97,6 @@ fn check_target_quant_contract(store: &WeightStore, config: &ModelConfig) -> Res
     Ok(())
 }
 
-#[expect(
-    dead_code,
-    reason = "Retain independent draft diagnostics for native DSpark implementation"
-)]
 fn check_dspark_quant_contract(store: &WeightStore, config: &ModelConfig) -> Result<()> {
     let draft_config = native_dspark_config(config)?;
     let stages = discover_dspark_stages(store);

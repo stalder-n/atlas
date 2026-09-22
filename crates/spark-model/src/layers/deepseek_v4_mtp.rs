@@ -339,6 +339,9 @@ impl DeepseekV4MtpHead {
             gdn_exact_replay: false,
             gdn_write_on_accept: false,
             token_ids: ctx.token_ids,
+            // MTP/DSpark draft body. Image-span drafting is Phase 3 (U3.1)
+            // work; until then the draft head runs the causal window.
+            image_window: None,
             host_token_ids: None,
             routed_lora_layers: None, // #30: MTP draft body; no prefill LoRA route.
             midchunk_capture: None,
@@ -456,7 +459,7 @@ impl DeepseekV4MtpHead {
 /// logit vector, mask off (→ -inf) tokens the grammar rejects, argmax on CPU.
 /// Returns `0` (pad) when the matcher's allowed set is empty so the draft is
 /// rejected at verify rather than emitting a possibly-special token.
-fn argmax_grammar_masked(
+pub(crate) fn argmax_grammar_masked(
     gpu: &dyn GpuBackend,
     logits: DevicePtr,
     vocab: usize,

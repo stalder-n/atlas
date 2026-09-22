@@ -994,6 +994,32 @@ pub(crate) fn load_model(
             .dflash_gamma()
             .unwrap_or_else(|| args.resolved_dflash_gamma(None));
         g.saturating_sub(1).max(1)
+    } else if config.model_type == "deepseek_v4"
+        && config.dspark_block_size > 0
+        && scheduler_model.dflash_gamma().is_some()
+    {
+        // 🔴 The native DSpark block is trained at γ = 5, but `num_drafts ≤ 3`
+        // is the highest this serve path can actually reach.
+        // `scheduler/mtp_step.rs` routes `drafts.len() >= 4` to
+        // `step_verify_dflash`, whose model hooks (`dflash_accept_append`,
+        // `dflash_eagle_accept_append`, `dflash_eagle_kgamma_append`) hard-error
+        // with "not DFlash proposer state" on any state that is not a
+        // `DflashProposerState`. Asking for 4 or 5 would therefore fail at the
+        // first verify, not draft better.
+        //
+        // 3 is also the recipe default (vLLM's measured optimum for this
+        // checkpoint, `[behavior].default_num_drafts` in MODEL.toml), so the
+        // clamp costs nothing today. Raising it means teaching the DFlash
+        // verify ladder about DSpark — a follow-up unit, not a flag flip.
+        const DSPARK_MAX_DRAFTS: usize = 3;
+        let asked = args.resolved_num_drafts();
+        let capped = asked.min(DSPARK_MAX_DRAFTS);
+        if capped != asked {
+            tracing::warn!(
+                "DSpark: --num-drafts {asked} clamped to {capped}; the K=γ verify ladder is                  DFlash-only, so drafts.len() >= 4 cannot be verified on this path"
+            );
+        }
+        capped
     } else {
         args.resolved_num_drafts()
     };

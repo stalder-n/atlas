@@ -36,9 +36,38 @@ num_shared_experts = 1
 moe_intermediate_size = 2048
 top_k = 6
 
-# Legacy num_nextn_predict_layers metadata. Native 0731 DSpark has three
-# stages and K=5 proposals; K is not a layer count. DSpark is not implemented.
-mtp_layers = 1
+# `num_nextn_predict_layers` for the 0731 / Vision-Exp family: the native
+# DSpark module is THREE stages (`mtp.{0,1,2}`), one full V4 body each. It is
+# not a proposal count — the block size is 5, below.
+#
+# `nvidia/DeepSeek-V4-Flash-NVFP4` is a different checkpoint family with ONE
+# legacy MTP module (`mtp.0.enorm`, no `mtp.0.main_proj`); its loader stands
+# down when the native stages are present and vice versa, so this number
+# describes the native family only. Documentation — the runtime reads
+# `num_nextn_predict_layers` from config.json, never from here.
+mtp_layers = 3
+
+# ── Native DSpark block drafter (Phase 3 / U3.1) ───────────────────────────
+# Documentation of the checkpoint's own constants; every one of them is read
+# at RUNTIME from config.json (`dspark_*`), never from this file. They are
+# recorded here because the kernel target is where the per-model behaviour
+# contract lives, and because two of them pin kernel-visible shapes.
+#
+#   dspark_block_size        5    γ: one propose emits 5 drafts at once.
+#   dspark_noise_token_id    128799  fills draft slots 1..γ.
+#   dspark_target_layer_ids  [40,41,42]  captured as the hc-stream MEAN.
+#   dspark_markov_rank       256  the bigram tables are [vocab_size, rank].
+#   ring depth               = sliding_window (128), slot = pos % window.
+#
+# SERVED AT num_drafts = 3, NOT 5: `scheduler/mtp_step.rs` routes
+# `drafts.len() >= 4` to the DFlash-only verify ladder, whose model hooks
+# reject a non-`DflashProposerState`. 3 is also vLLM's measured optimum for
+# this checkpoint, so the clamp costs nothing today.
+#
+# The drafter needs one module of its own, `dspark_capture`
+# (`nvfp4/dspark_capture.cu`, entry `dspark_hc_mean_capture`). It has NO
+# fallback and therefore gets no `[expected_absent]` entry below: absence must
+# fail the boot audit.
 
 # Hyper-Connections (mHC)
 hc_mult = 4
@@ -89,6 +118,10 @@ top_k = 20
 presence_penalty = 0.0
 
 [behavior]
+# Recipe default for the native DSpark drafter (vLLM's measured optimum for
+# this checkpoint). Inert without `--speculative`; `--num-drafts` overrides it,
+# and `serve_load.rs` clamps the result to 3 for a DSpark proposer.
+default_num_drafts = 3
 # Content-loop watchdog: enabled for DeepSeek V4 to prevent failure modes.
 enable_loop_watchdog = true
 # Thinking is controlled by template; V4 supports reasoning traces.
